@@ -33,11 +33,17 @@ const AGENTS = {
     args: [],
     color: '#60a5fa',
   },
-  antigravity: {
-    label: 'Antigravity',
-    cmd: 'antigravity',
+  hermes: {
+    label: 'Hermes',
+    cmd: 'hermes',
     args: [],
-    color: '#f472b6',
+    color: '#fb923c',
+  },
+  kimi: {
+    label: 'Kimi',
+    cmd: 'kimi',
+    args: [],
+    color: '#2dd4bf',
   },
 };
 
