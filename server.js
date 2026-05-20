@@ -45,6 +45,12 @@ const AGENTS = {
     args: [],
     color: '#2dd4bf',
   },
+  gemini: {
+    label: 'Gemini (Antigravity)',
+    cmd: 'gemini',
+    args: [],
+    color: '#facc15',
+  },
 };
 
 // Active sessions: id -> { pty, ws, agentKey, cwd }
