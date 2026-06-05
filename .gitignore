@@ -2,3 +2,7 @@ node_modules/
 daemon/
 *.log
 .env
+dist/
+.quality-gate/logs/
+.quality-gate/runs/
+.quality-gate/reports/

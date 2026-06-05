@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "project": "agentdash",
+  "profile": "node-electron",
+  "paths": {
+    "report_dir": ".quality-gate/reports",
+    "run_dir": ".quality-gate/runs",
+    "log_dir": ".quality-gate/logs"
+  },
+  "levels": {
+    "smoke": {
+      "required": ["changed-files"]
+    },
+    "normal": {
+      "required": ["changed-files", "build"],
+      "conditional": ["markdown-audit-if-docs-changed"]
+    },
+    "release": {
+      "required": ["changed-files", "build", "test-hack-detector"]
+    }
+  },
+  "commands": {
+    "build": {
+      "shell": "powershell",
+      "command": "Get-ChildItem -Recurse -File -Include *.js | Where-Object { $_.FullName -notmatch '\\\\node_modules\\\\|\\\\dist\\\\' } | ForEach-Object { node --check $_.FullName }",
+      "timeout_seconds": 240
+    },
+    "package": {
+      "shell": "powershell",
+      "command": "npm run build -- --publish=never",
+      "timeout_seconds": 600,
+      "skip_reason": "Electron packaging currently requires Visual Studio Spectre-mitigated C++ libraries for node-pty rebuild on this machine."
+    },
+    "markdown-audit": {
+      "shell": "powershell",
+      "command": "python C:\\Users\\kruil\\.codex\\skills\\obsidian-markdown-auditor\\scripts\\obsidian_markdown_audit.py validate --root C:\\Users\\kruil\\Documents\\Projects --stage stage2",
+      "timeout_seconds": 240
+    }
+  },
+  "changed_file_rules": {
+    "docs": {
+      "patterns": ["**/*.md"],
+      "checks": ["markdown-audit-if-docs-changed"]
+    },
+    "app": {
+      "patterns": [
+        "*.js",
+        "lib/**/*.js",
+        "public/**/*.js",
+        "public/**/*.html",
+        "public/**/*.css"
+      ],
+      "risk": "app-critical"
+    },
+    "gate": {
+      "patterns": [
+        "quality-gate.json",
+        "package.json",
+        "package-lock.json",
+        "AGENTS.md",
+        ".codex/**",
+        ".agents/**"
+      ],
+      "risk": "gate-critical"
+    }
+  },
+  "exceptions": {
+    "allow_with_expiry": true,
+    "max_days": 14
+  }
+}
