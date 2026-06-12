@@ -337,6 +337,11 @@ html, body {
   color: var(--text-faint);
   font-size: 11px;
 }
+.goal-actions {
+  display: flex;
+  gap: 8px;
+}
+.goal-actions .btn { flex: 1; }
 .status-border-active { border-color: var(--blue); }
 .status-border-blocked { border-color: var(--red); }
 .status-border-done { border-color: var(--green); }
@@ -779,6 +784,25 @@ html, body {
   gap: 6px;
   margin-left: auto;
 }
+.prompt-delivery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 18px 12px;
+  padding: 10px 12px;
+  color: var(--text-dim);
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  border-radius: 8px;
+  font-size: 11px;
+}
+.prompt-delivery[hidden] { display: none; }
+.prompt-delivery-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
 .detail-meta {
   display: flex;
   flex-wrap: wrap;
@@ -882,7 +906,8 @@ html, body {
   font-weight: 600;
 }
 .modal-content select,
-.modal-content input {
+.modal-content input,
+.modal-content textarea {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -896,7 +921,21 @@ html, body {
   font-weight: 400;
 }
 .modal-content select:focus,
-.modal-content input:focus { border-color: var(--accent); }
+.modal-content input:focus,
+.modal-content textarea:focus { border-color: var(--accent); }
+.modal-content textarea { resize: vertical; }
+.modal-content .check-label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.modal-content .check-label input {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;

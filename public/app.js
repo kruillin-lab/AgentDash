@@ -1,5 +1,12 @@
 'use strict';
 
+const PROMPT_MIN_DELAY_MS = 4000;
+const PROMPT_READY_TIMEOUT_MS = {
+  claude: 15000,
+  hermes: 25000,
+  default: 15000,
+};
+
 const state = {
   agents: {},
   sessions: [],
@@ -12,6 +19,7 @@ const state = {
   view: 'projects',
   detailId: null,
 };
+let pendingPromptDelivery = null;
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -263,6 +271,7 @@ function renderProjects(data) {
         </div>
         ${project.projectPath ? `<button class="btn btn-ghost path-copy" data-copy="${escapeAttr(project.projectPath)}">${escape(project.projectPath)}</button>` : ''}
         ${project.reportPath ? `<button class="btn btn-ghost path-copy" data-copy="${escapeAttr(project.reportPath)}">Copy project report</button>` : ''}
+        ${project.projectPath ? `<button class="btn" data-launch-cwd="${escapeAttr(project.projectPath)}">Launch agent</button>` : ''}
       </div>
     `;
     grid.appendChild(card);
@@ -346,7 +355,10 @@ function renderGoals(data) {
           <span>Last verification: ${escape(goal.lastVerification?.result || 'unknown')}</span>
           <span>${goal.lastVerification?.at ? fmtRelative(goal.lastVerification.at) : 'No timestamp recorded'}</span>
         </div>
-        <button class="btn" data-goal-index="${index}">View tasks</button>
+        <div class="goal-actions">
+          <button class="btn" data-goal-index="${index}">View tasks</button>
+          ${goal.projectPath ? `<button class="btn" data-launch-cwd="${escapeAttr(goal.projectPath)}" data-launch-prompt="${escapeAttr(`Open goal: ${goal.slug}`)}">Launch agent</button>` : ''}
+        </div>
       </div>
     `;
     grid.appendChild(card);
@@ -758,6 +770,9 @@ let activeTerminal = null;
 let lastLogLength = 0;
 
 async function openDetail(id) {
+  if (pendingPromptDelivery && pendingPromptDelivery.sessionId !== id) {
+    cancelPromptDelivery();
+  }
   state.detailId = id;
   lastLogLength = 0;
   
@@ -811,6 +826,7 @@ async function openDetail(id) {
   }
   
   await loadDetail(id);
+  renderPromptDelivery();
 }
 
 async function loadDetail(id) {
@@ -847,6 +863,119 @@ async function loadDetail(id) {
   } catch (err) {
     console.error('Failed to load detail output:', err);
   }
+}
+
+function isAgentReady(agentKey, raw) {
+  if (!raw) return false;
+  if (agentKey === 'claude') return /Claude Code|❯/.test(raw);
+  if (agentKey === 'hermes') return /Welcome to Hermes Agent!|⚕\s*❯/.test(raw);
+  return /❯|>\s*$/.test(raw);
+}
+
+function renderPromptDelivery() {
+  const panel = $('#prompt-delivery');
+  if (!panel) return;
+  const delivery = pendingPromptDelivery;
+  if (!delivery || delivery.sessionId !== state.detailId || delivery.cancelled) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  $('#prompt-delivery-text').textContent = delivery.message;
+  $('#send-prompt-now').hidden = delivery.delivered || delivery.sending;
+  $('#cancel-prompt-delivery').hidden = delivery.delivered;
+}
+
+function cancelPromptDelivery() {
+  if (!pendingPromptDelivery) return;
+  pendingPromptDelivery.cancelled = true;
+  pendingPromptDelivery = null;
+  renderPromptDelivery();
+}
+
+async function sendPendingPrompt(delivery = pendingPromptDelivery) {
+  if (!delivery || delivery.cancelled || delivery.delivered || delivery.sending) return false;
+  delivery.sending = true;
+  delivery.message = 'Sending initial prompt once...';
+  renderPromptDelivery();
+  try {
+    await api(`/api/sessions/${delivery.sessionId}/input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: `${delivery.prompt}\r` }),
+    });
+    delivery.delivered = true;
+    delivery.message = 'Initial prompt sent once.';
+    renderPromptDelivery();
+    setTimeout(() => {
+      if (pendingPromptDelivery === delivery) {
+        pendingPromptDelivery = null;
+        renderPromptDelivery();
+      }
+    }, 2500);
+    return true;
+  } catch (err) {
+    delivery.message = `Prompt not sent: ${err.message}`;
+    return false;
+  } finally {
+    delivery.sending = false;
+    renderPromptDelivery();
+  }
+}
+
+async function waitForPromptReadiness(delivery) {
+  const timeout = PROMPT_READY_TIMEOUT_MS[delivery.agentKey] || PROMPT_READY_TIMEOUT_MS.default;
+  while (pendingPromptDelivery === delivery && !delivery.cancelled && !delivery.delivered) {
+    const elapsed = Date.now() - delivery.startedAt;
+    if (elapsed >= timeout) {
+      delivery.message = 'Readiness was not detected. Review the terminal, then send manually.';
+      renderPromptDelivery();
+      return;
+    }
+    try {
+      const { raw } = await api(`/api/sessions/${delivery.sessionId}/output`);
+      if (elapsed >= PROMPT_MIN_DELAY_MS && isAgentReady(delivery.agentKey, raw)) {
+        await sendPendingPrompt(delivery);
+        return;
+      }
+    } catch (err) {
+      delivery.message = `Waiting stopped: ${err.message}`;
+      renderPromptDelivery();
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+function preparePromptDelivery(session, prompt, automatic) {
+  cancelPromptDelivery();
+  const delivery = {
+    sessionId: session.id,
+    agentKey: session.agentKey,
+    prompt,
+    startedAt: Date.now(),
+    cancelled: false,
+    delivered: false,
+    sending: false,
+    message: automatic
+      ? 'Waiting for the agent to become ready. Cancel to keep the prompt unsent.'
+      : 'Initial prompt is ready for manual delivery.',
+  };
+  pendingPromptDelivery = delivery;
+  renderPromptDelivery();
+  if (automatic) waitForPromptReadiness(delivery);
+}
+
+async function openLaunchModal(prefill = {}) {
+  await loadCwdHistory();
+  $('#cwd-input').value = prefill.cwd || '';
+  $('#prompt-input').value = prefill.prompt || '';
+  $('#agent-select').value = prefill.agentKey && state.agents[prefill.agentKey]
+    ? prefill.agentKey
+    : 'claude';
+  $('#auto-prompt').checked = true;
+  $('#launch-modal').classList.add('visible');
+  setTimeout(() => (prefill.cwd ? $('#prompt-input') : $('#cwd-input')).focus(), 50);
 }
 
 function switchView(view) {
@@ -909,6 +1038,7 @@ function setActiveZonePolling(viewName) {
 function bindEvents() {
   $$('.nav-item').forEach((el) => {
     el.addEventListener('click', () => {
+      cancelPromptDelivery();
       state.detailId = null;
       if (activeTerminal) {
         try { activeTerminal.dispose(); } catch (_) {}
@@ -919,6 +1049,7 @@ function bindEvents() {
   });
   
   $('#back-btn').addEventListener('click', () => {
+    cancelPromptDelivery();
     state.detailId = null;
     if (activeTerminal) {
       try { activeTerminal.dispose(); } catch (_) {}
@@ -940,12 +1071,11 @@ function bindEvents() {
   $('#resume-detail').addEventListener('click', async () => {
     if (state.detailId) await resumeSession(state.detailId);
   });
+
+  $('#send-prompt-now').addEventListener('click', () => sendPendingPrompt());
+  $('#cancel-prompt-delivery').addEventListener('click', cancelPromptDelivery);
   
-  $('#open-launch').addEventListener('click', () => {
-    loadCwdHistory();
-    $('#launch-modal').classList.add('visible');
-    setTimeout(() => $('#cwd-input').focus(), 50);
-  });
+  $('#open-launch').addEventListener('click', () => openLaunchModal());
   
   $('#cancel-launch').addEventListener('click', () => {
     $('#launch-modal').classList.remove('visible');
@@ -963,22 +1093,36 @@ function bindEvents() {
   $('#confirm-launch').addEventListener('click', async () => {
     const agentKey = $('#agent-select').value;
     const cwd = $('#cwd-input').value.trim() || undefined;
+    const prompt = $('#prompt-input').value.trim();
+    const automatic = $('#auto-prompt').checked;
     try {
-      await api('/api/sessions', {
+      const session = await api('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agentKey, cwd }),
       });
       $('#launch-modal').classList.remove('visible');
       $('#cwd-input').value = '';
+      $('#prompt-input').value = '';
       loadCwdHistory();
-      refresh();
+      await refresh();
+      await openDetail(session.id);
+      if (prompt) preparePromptDelivery(session, prompt, automatic);
     } catch (err) {
       alert('Launch failed: ' + err.message);
     }
   });
 
   document.addEventListener('click', async (event) => {
+    const launchButton = event.target.closest('[data-launch-cwd]');
+    if (launchButton) {
+      await openLaunchModal({
+        cwd: launchButton.dataset.launchCwd,
+        prompt: launchButton.dataset.launchPrompt || '',
+      });
+      return;
+    }
+
     const goalButton = event.target.closest('[data-goal-index]');
     if (goalButton) {
       openGoalModal(Number(goalButton.dataset.goalIndex));

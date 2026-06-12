@@ -148,6 +148,13 @@
           </div>
         </div>
         <div class="detail-meta" id="detail-meta"></div>
+        <div class="prompt-delivery" id="prompt-delivery" hidden>
+          <span id="prompt-delivery-text"></span>
+          <div class="prompt-delivery-actions">
+            <button class="btn" id="send-prompt-now">Send now</button>
+            <button class="btn btn-ghost" id="cancel-prompt-delivery">Cancel</button>
+          </div>
+        </div>
         <div class="detail-output" id="terminal-container"></div>
         <form class="detail-input" id="detail-input-form" style="display: none;">
           <input type="text" id="detail-input" placeholder="Type here and press Enter...">
@@ -167,6 +174,13 @@
     <label>Working Directory (optional)
       <input type="text" id="cwd-input" list="cwd-history" placeholder="C:\path\to\project" autocomplete="off">
       <datalist id="cwd-history"></datalist>
+    </label>
+    <label>Initial Prompt (optional)
+      <textarea id="prompt-input" maxlength="4000" rows="4" placeholder="Visible and editable before launch"></textarea>
+    </label>
+    <label class="check-label">
+      <input type="checkbox" id="auto-prompt" checked>
+      <span>Send once when the agent is ready</span>
     </label>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="cancel-launch">Cancel</button>
