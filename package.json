@@ -15,6 +15,7 @@
   "build": {
     "appId": "com.agentdash.app",
     "productName": "AgentDash",
+    "npmRebuild": false,
     "directories": {
       "output": "dist"
     },
@@ -28,8 +29,7 @@
     ],
     "extraResources": [],
     "win": {
-      "target": "nsis",
-      "icon": "public/icon.png"
+      "target": "nsis"
     },
     "nsis": {
       "oneClick": false,

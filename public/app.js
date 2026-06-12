@@ -1074,9 +1074,9 @@ function bindEvents() {
 
   $('#send-prompt-now').addEventListener('click', () => sendPendingPrompt());
   $('#cancel-prompt-delivery').addEventListener('click', cancelPromptDelivery);
-  
+
   $('#open-launch').addEventListener('click', () => openLaunchModal());
-  
+
   $('#cancel-launch').addEventListener('click', () => {
     $('#launch-modal').classList.remove('visible');
   });

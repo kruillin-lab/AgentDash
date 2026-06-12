@@ -59,4 +59,3 @@ Stop only when the final Judge records `full_outcome_complete: true`, all requir
 ```text
 /goal Follow docs/goals/agentos-six-phase/goal.md.
 ```
-
