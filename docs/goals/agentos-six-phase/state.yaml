@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T106
+active_task: T107
 
 tasks:
   - id: T000
@@ -338,7 +338,7 @@ tasks:
   - id: T106
     type: worker
     assignee: Worker
-    status: active
+    status: done
     objective: "Implement P5 secure session launch, exit, interrupt, and resume behavior."
     allowed_files:
       - server.js
@@ -360,12 +360,46 @@ tasks:
       - "A command outside the fixed agent registry is required."
       - "ConPTY interrupt remains destructive after two approaches."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Replaced the persistent PowerShell bootstrap with fixed executable/argv descriptors, added Hermes, secure CWD policy, lifecycle persistence, native-ID capture, interrupt/resume routes, and UI controls."
+      commit: b545615
+      changed_files:
+        - server.js
+        - lib/cwd-policy.js
+        - lib/sessions.js
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+        - test/cwd-policy.test.js
+        - test/sessions.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+          summary: "38 tests passed."
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "Claude sessions 10 and 11 lifecycle"
+          status: pass
+          summary: "Interrupt preserved the live PTY; exit code 0 persisted; by-ID resume restored the prior prompt and retained output."
+        - cmd: "Hermes sessions 12 through 14 lifecycle"
+          status: pass
+          summary: "Interrupt preserved the live PTY; normal exit and kill persisted distinct states; latest and by-ID resumes restored both prior prompts."
+        - cmd: "In-app Browser Sessions and launch-modal walkthrough"
+          status: pass
+      evidence:
+        - "Claude native session dbfc9963-0cc7-415e-8084-f7580e6ea3f7 captured and resumed."
+        - "Hermes native session 20260612_154952_3e9064 captured and resumed."
+        - "New routes return HTTP 200 with structured errors."
+        - "Codex ACP renders Resume unsupported."
+        - "No browser console errors."
+      notes:
+        - "Claude accepted post-interrupt input and restored it on resume; the account session limit prevented a model reply during the smoke test."
 
   - id: T107
     type: worker
     assignee: Worker
-    status: queued
+    status: active
     objective: "Implement P6 project/goal launch prefill and measured initial-prompt delivery."
     allowed_files:
       - public/index.html
@@ -421,7 +455,13 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T105
+    task: T106
     commands:
-      - cmd: "Read-only P1-P4 and P5-boundary review"
+      - cmd: "npm test"
+        status: pass
+      - cmd: "npm run check"
+        status: pass
+      - cmd: "Claude and Hermes empirical lifecycle verification"
+        status: pass
+      - cmd: "In-app Browser Sessions walkthrough"
         status: pass
