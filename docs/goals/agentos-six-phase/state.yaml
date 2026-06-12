@@ -1,0 +1,277 @@
+version: 2
+
+goal:
+  title: "AgentOS Six-Phase Execution"
+  slug: agentos-six-phase
+  kind: existing_plan
+  tranche: "Implement and verify P1-P6 continuously, with a risk-boundary Judge before P5 and a final completion audit."
+  status: active
+  oracle:
+    signal: "All five data zones, session Resume/Interrupt, and launch glue work in localhost and Electron while protected sources remain unchanged."
+    cadence: "after each phase and at T999"
+    final_proof: "Phase commits and receipts; node:test and syntax checks; API and browser walkthroughs; Electron/service evidence; protected-source comparison; normal quality-gate report."
+  intake:
+    original_request: "Implement the approved AgentOS six-phase plan in AgentDash."
+    interpreted_outcome: "AgentDash becomes a secure, verified AgentOS workflow dashboard without mutating its source systems."
+    input_shape: existing_plan
+    audience: "Luis"
+    authority: approved
+    proof_type: demo
+    completion_proof: "P1-P6 acceptance checks pass in supported runtimes and the final quality gate passes or passes with registered warnings."
+    likely_misfire: "The dashboard renders but packaging, lifecycle controls, security boundaries, or source protections are incomplete."
+    blind_spots_considered:
+      - "Existing redesign began as uncommitted work and was checkpointed at 4bf9158."
+      - "Canonical quality-gate data moved from legacy _brain to CodexBrain."
+      - "Agent CLIs have different resume and exit semantics."
+      - "Remote process-launch routes require stronger controls than localhost."
+      - "Automatic initial prompts can race agent startup."
+    existing_plan_facts:
+      - "Build order: P1, P2, P3, P4, boundary review, P5, P6."
+      - "Deferred schedule, inbox, and brain-log writes are excluded."
+      - "One explicit dependency may be added: js-yaml."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: installed
+  worker: installed
+  judge: installed
+
+visual_board:
+  selected: local
+  local:
+    status: live
+    url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
+    command: "npx goalbuddy board docs/goals/agentos-six-phase"
+
+active_task: T101
+
+tasks:
+  - id: T000
+    type: pm
+    assignee: PM
+    status: done
+    objective: "Checkpoint the approved redesign and establish the goal controls."
+    receipt:
+      result: done
+      summary: "Created branch codex/agentos-six-phase and committed the approved redesign baseline."
+      commit: 4bf9158
+      note: notes/protected-source-snapshot.md
+
+  - id: T101
+    type: worker
+    assignee: Worker
+    status: active
+    objective: "Implement P1 Projects and shared foundations, including packaging and tests."
+    allowed_files:
+      - package.json
+      - package-lock.json
+      - server.js
+      - lib/cache.js
+      - lib/gates.js
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test/cache.test.js
+      - test/gates.test.js
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "API smoke: GET /api/projects"
+      - "Browser walkthrough: Projects"
+    stop_if:
+      - "Canonical CodexBrain gate schema differs from inspected runs."
+      - "Implementation would write under CodexBrain."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T102
+    type: worker
+    assignee: Worker
+    status: queued
+    objective: "Implement P2 GoalBuddy goal discovery, parsing, and detail UI."
+    allowed_files:
+      - server.js
+      - lib/goals.js
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test/goals.test.js
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "API smoke: GET /api/goals"
+      - "Browser walkthrough: Goals and task modal"
+    stop_if:
+      - "Goal files would need mutation."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T103
+    type: worker
+    assignee: Worker
+    status: queued
+    objective: "Implement P3 read-only Windows scheduled-routine health."
+    allowed_files:
+      - server.js
+      - lib/schedules.js
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test/schedules.test.js
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "API smoke: GET /api/schedules"
+      - "Browser walkthrough: Schedules"
+    stop_if:
+      - "Any Scheduler write cmdlet is required."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T104
+    type: worker
+    assignee: Worker
+    status: queued
+    objective: "Implement P4 read-only Recall and Inbox views."
+    allowed_files:
+      - server.js
+      - lib/recall.js
+      - lib/inbox.js
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test/recall.test.js
+      - test/inbox.test.js
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "API smoke: GET /api/recall and GET /api/inbox"
+      - "Browser walkthrough: Recall and Inbox"
+    stop_if:
+      - "Recall or inbox source mutation is required."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T105
+    type: judge
+    assignee: Judge
+    status: queued
+    objective: "Audit P1-P4 and approve the session lifecycle boundary."
+    constraints:
+      - "Read-only."
+      - "Check route contracts, source protections, packaging, and readiness for P5."
+    expected_output:
+      - "approved | revise"
+      - "P5 corrections"
+      - "missing verification"
+    receipt: null
+
+  - id: T106
+    type: worker
+    assignee: Worker
+    status: queued
+    objective: "Implement P5 secure session launch, exit, interrupt, and resume behavior."
+    allowed_files:
+      - server.js
+      - lib/sessions.js
+      - lib/storage.js
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test/sessions.test.js
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "Empirical Claude launch, interrupt, exit, and resume"
+      - "Empirical Hermes launch, interrupt, exit, and resume"
+    stop_if:
+      - "A command outside the fixed agent registry is required."
+      - "ConPTY interrupt remains destructive after two approaches."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T107
+    type: worker
+    assignee: Worker
+    status: queued
+    objective: "Implement P6 project/goal launch prefill and measured initial-prompt delivery."
+    allowed_files:
+      - public/index.html
+      - public/app.js
+      - public/styles.css
+      - test
+      - docs/goals/agentos-six-phase/state.yaml
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "Two Claude and two Hermes prompt-delivery trials"
+      - "Browser walkthrough: Projects and Goals launch actions"
+    stop_if:
+      - "Prompt delivery duplicates or fires before readiness."
+      - "Verification fails twice."
+    receipt: null
+
+  - id: T108
+    type: pm
+    assignee: PM
+    status: queued
+    objective: "Run complete runtime, packaging, protected-source, and quality-gate verification."
+    verify:
+      - "npm test"
+      - "npm run check"
+      - "npm run app"
+      - "Service-mode server startup on port 3000"
+      - "npm run build -- --publish=never"
+      - "Normal AgentDash quality gate"
+    receipt: null
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: queued
+    objective: "Final audit against the full AgentOS oracle."
+    inputs:
+      - "All phase receipts and commits"
+      - "Runtime walkthrough evidence"
+      - "Protected-source comparison"
+      - "Final quality-gate report"
+    constraints:
+      - "Read-only."
+      - "Reject completion if any required Worker remains queued or active."
+      - "Require full_outcome_complete: true."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "missing evidence"
+    receipt: null
+
+checks:
+  dirty_fingerprint: "baseline commit 4bf9158"
+  last_verification:
+    result: pending
+    task: T101
+    commands: []
