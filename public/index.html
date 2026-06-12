@@ -22,6 +22,12 @@
       <button class="nav-item" data-view="schedules">
         <span class="nav-icon">◷</span>Schedules
       </button>
+      <button class="nav-item" data-view="recall">
+        <span class="nav-icon">⌕</span>Recall
+      </button>
+      <button class="nav-item" data-view="inbox">
+        <span class="nav-icon">▱</span>Inbox
+      </button>
       <button class="nav-item" data-view="dashboard">
         <span class="nav-icon">▦</span>Dashboard
       </button>
@@ -58,6 +64,25 @@
       <div class="card">
         <div id="schedules-table" class="schedules-table"></div>
       </div>
+    </section>
+
+    <section id="view-recall" class="view">
+      <div class="card recall-search-card">
+        <form id="recall-form" class="recall-form">
+          <label for="recall-query">Search durable project context</label>
+          <div class="recall-controls">
+            <input id="recall-query" type="search" maxlength="200" placeholder="e.g. AgentDash quality gate" autocomplete="off">
+            <button class="btn btn-launch" type="submit">Search</button>
+          </div>
+        </form>
+      </div>
+      <div id="recall-summary"></div>
+      <div id="recall-results" class="recall-results"></div>
+    </section>
+
+    <section id="view-inbox" class="view">
+      <div id="inbox-summary"></div>
+      <div id="inbox-content" class="inbox-content"></div>
     </section>
 
     <section id="view-dashboard" class="view">

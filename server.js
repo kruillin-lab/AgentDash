@@ -9,6 +9,8 @@ const storage = require('./lib/storage');
 const gates = require('./lib/gates');
 const goals = require('./lib/goals');
 const schedules = require('./lib/schedules');
+const recall = require('./lib/recall');
+const inbox = require('./lib/inbox');
 
 const app = express();
 const server = http.createServer(app);
@@ -133,6 +135,34 @@ app.get('/api/schedules', async (_req, res) => {
       routines: [],
       tookMs: 0,
       error: { code: 'SCHEDULE_QUERY_FAILED', message: err.message },
+    });
+  }
+});
+
+app.get('/api/recall', async (req, res) => {
+  try {
+    res.json(await recall.search(req.query.q));
+  } catch (err) {
+    res.json({
+      query: typeof req.query.q === 'string' ? req.query.q : '',
+      engine: 'fts5',
+      results: [],
+      tookMs: 0,
+      error: { code: 'RECALL_FAILED', message: err.message },
+    });
+  }
+});
+
+app.get('/api/inbox', async (_req, res) => {
+  try {
+    res.json(await inbox.listInbox());
+  } catch (err) {
+    res.json({
+      root: inbox._internals.INBOX_ROOT,
+      folders: [],
+      looseFiles: [],
+      total: 0,
+      error: { code: 'INBOX_READ_FAILED', message: err.message },
     });
   }
 });

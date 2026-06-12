@@ -440,6 +440,108 @@ html, body {
 .status-badge.status-disabled,
 .status-badge.status-not-found { color: var(--text-faint); background: var(--surface3); }
 
+.recall-search-card {
+  padding: 18px;
+}
+.recall-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.recall-form label {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.recall-controls {
+  display: flex;
+  gap: 8px;
+}
+.recall-controls input {
+  flex: 1;
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+}
+.recall-controls input:focus { border-color: var(--accent); }
+.recall-controls .btn-launch { width: auto; }
+.recall-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.recall-result {
+  display: grid;
+  grid-template-columns: 42px 1fr auto;
+  gap: 14px;
+  padding: 16px 18px;
+}
+.recall-rank {
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 700;
+}
+.recall-body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.recall-body h2 { font-size: 13px; }
+.recall-body p {
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.recall-body .path-copy { max-width: 100%; }
+.recall-meta,
+.recall-score {
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 10px;
+}
+
+.inbox-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.inbox-folder .card-header {
+  justify-content: space-between;
+}
+.count-pill {
+  min-width: 24px;
+  padding: 3px 7px;
+  color: var(--accent);
+  background: rgba(167, 139, 250, 0.12);
+  border-radius: 999px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+}
+.inbox-file-list {
+  display: flex;
+  flex-direction: column;
+}
+.inbox-file-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) 90px 100px 160px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px;
+}
+.inbox-file-row:last-child { border-bottom: none; }
+.inbox-file-row .mono {
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border-soft);

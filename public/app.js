@@ -7,6 +7,8 @@ const state = {
   projects: null,
   goals: null,
   schedules: null,
+  recall: null,
+  inbox: null,
   view: 'projects',
   detailId: null,
 };
@@ -108,6 +110,41 @@ async function loadSchedules() {
     };
   }
   renderSchedules(state.schedules);
+}
+
+async function searchRecall(query) {
+  const summary = $('#recall-summary');
+  const results = $('#recall-results');
+  summary.innerHTML = '<div class="loading-panel">Searching local recall index…</div>';
+  results.innerHTML = '';
+
+  try {
+    state.recall = await api(`/api/recall?q=${encodeURIComponent(query)}`);
+  } catch (err) {
+    state.recall = {
+      query,
+      engine: 'fts5',
+      results: [],
+      tookMs: 0,
+      error: { code: 'NETWORK_ERROR', message: err.message },
+    };
+  }
+  renderRecall(state.recall);
+}
+
+async function loadInbox() {
+  try {
+    state.inbox = await api('/api/inbox');
+  } catch (err) {
+    state.inbox = {
+      root: '',
+      folders: [],
+      looseFiles: [],
+      total: 0,
+      error: { code: 'NETWORK_ERROR', message: err.message },
+    };
+  }
+  renderInbox(state.inbox);
 }
 
 function fmtTime(iso) {
@@ -409,6 +446,138 @@ function renderSchedules(data) {
   }
 }
 
+function renderRecall(data) {
+  const summary = $('#recall-summary');
+  const results = $('#recall-results');
+  if (!summary || !results) return;
+
+  if (!data || data.error) {
+    const error = data?.error || { code: 'NO_DATA', message: 'Recall is unavailable.' };
+    summary.innerHTML = `
+      <div class="error-panel">
+        <b>${escape(error.code)}</b>
+        <span>${escape(error.message)}</span>
+      </div>
+    `;
+    results.innerHTML = '';
+    return;
+  }
+
+  const hits = Array.isArray(data.results) ? data.results : [];
+  summary.innerHTML = `
+    <div class="zone-summary">
+      <div>
+        <div class="eyebrow">${escape(data.engine || 'fts5')} local recall</div>
+        <div class="zone-summary-title">${hits.length} results for “${escape(data.query)}”</div>
+      </div>
+      <div class="summary-counts">
+        <span><b>${data.tookMs || 0}ms</b> search</span>
+      </div>
+    </div>
+  `;
+
+  results.innerHTML = '';
+  if (hits.length === 0) {
+    results.innerHTML = '<div class="empty card">No recall matches found.</div>';
+    return;
+  }
+
+  hits.forEach((hit, index) => {
+    const item = document.createElement('article');
+    item.className = 'card recall-result';
+    item.innerHTML = `
+      <div class="recall-rank">#${index + 1}</div>
+      <div class="recall-body">
+        <h2>${escape(hit.title || hit.path)}</h2>
+        <button class="btn btn-ghost path-copy" data-copy="${escapeAttr(hit.path)}">${escape(hit.path)}</button>
+        ${hit.meta ? `<div class="recall-meta">${escape(hit.meta)}</div>` : ''}
+        <p>${escape(hit.snippet || '')}</p>
+      </div>
+      <div class="recall-score">${hit.rank == null ? '' : escape(hit.rank)}</div>
+    `;
+    results.appendChild(item);
+  });
+}
+
+function fmtBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function inboxFileRow(file) {
+  return `
+    <div class="inbox-file-row">
+      <span>${escape(file.name)}</span>
+      <span class="mono">${fmtBytes(file.size)}</span>
+      <span>${fmtRelative(file.mtime)}</span>
+      <button class="btn btn-ghost path-copy" data-copy="${escapeAttr(file.relPath)}">Copy relative path</button>
+    </div>
+  `;
+}
+
+function renderInbox(data) {
+  const summary = $('#inbox-summary');
+  const content = $('#inbox-content');
+  if (!summary || !content) return;
+
+  if (!data || data.error) {
+    const error = data?.error || { code: 'NO_DATA', message: 'Inbox is unavailable.' };
+    summary.innerHTML = `
+      <div class="error-panel">
+        <b>${escape(error.code)}</b>
+        <span>${escape(error.message)}</span>
+      </div>
+    `;
+    content.innerHTML = '';
+    return;
+  }
+
+  const folders = Array.isArray(data.folders) ? data.folders : [];
+  const looseFiles = Array.isArray(data.looseFiles) ? data.looseFiles : [];
+  summary.innerHTML = `
+    <div class="zone-summary">
+      <div>
+        <div class="eyebrow">Projects inbox · read-only</div>
+        <div class="zone-summary-title">${data.total || 0} queued files</div>
+      </div>
+      <div class="summary-counts">
+        <span><b>${folders.length}</b> folders</span>
+        <span><b>${looseFiles.length}</b> loose files</span>
+      </div>
+      <button class="btn btn-ghost path-copy" data-copy="${escapeAttr(data.root || '')}">Copy inbox root</button>
+    </div>
+  `;
+
+  content.innerHTML = '';
+  if (looseFiles.length > 0) {
+    const loose = document.createElement('section');
+    loose.className = 'card inbox-folder';
+    loose.innerHTML = `
+      <div class="card-header"><h2>Loose files</h2><span class="count-pill">${looseFiles.length}</span></div>
+      <div class="inbox-file-list">${looseFiles.map(inboxFileRow).join('')}</div>
+    `;
+    content.appendChild(loose);
+  }
+
+  for (const folder of folders) {
+    const section = document.createElement('section');
+    section.className = 'card inbox-folder';
+    section.innerHTML = `
+      <div class="card-header"><h2>${escape(folder.name)}</h2><span class="count-pill">${folder.count}</span></div>
+      <div class="inbox-file-list">
+        ${folder.files.length > 0 ? folder.files.map(inboxFileRow).join('') : '<div class="empty">Empty folder</div>'}
+      </div>
+    `;
+    content.appendChild(section);
+  }
+
+  if (folders.length === 0 && looseFiles.length === 0) {
+    content.innerHTML = '<div class="empty card">Inbox is empty.</div>';
+  }
+}
+
 function renderStats() {
   const active = state.sessions.filter((s) => s.status === 'running').length;
   $('#stat-active').textContent = active;
@@ -630,6 +799,8 @@ function switchView(view) {
     projects: 'Projects',
     goals: 'Goals',
     schedules: 'Schedules',
+    recall: 'Recall',
+    inbox: 'Inbox',
     dashboard: 'Dashboard',
     sessions: 'Sessions',
     activity: 'Activity Feed',
@@ -640,6 +811,7 @@ function switchView(view) {
   if (view === 'projects') loadProjects();
   if (view === 'goals') loadGoals();
   if (view === 'schedules') loadSchedules();
+  if (view === 'inbox') loadInbox();
 }
 
 function escape(s) {
@@ -667,6 +839,8 @@ function setActiveZonePolling(viewName) {
     activeZoneInterval = setInterval(loadGoals, 30_000);
   } else if (viewName === 'schedules') {
     activeZoneInterval = setInterval(loadSchedules, 60_000);
+  } else if (viewName === 'inbox') {
+    activeZoneInterval = setInterval(loadInbox, 30_000);
   }
 }
 
@@ -703,6 +877,11 @@ function bindEvents() {
 
   $('#close-goal-modal').addEventListener('click', () => {
     $('#goal-modal').classList.remove('visible');
+  });
+
+  $('#recall-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    searchRecall($('#recall-query').value);
   });
   
   $('#confirm-launch').addEventListener('click', async () => {
