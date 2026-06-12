@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T105
+active_task: T106
 
 tasks:
   - id: T000
@@ -311,7 +311,7 @@ tasks:
   - id: T105
     type: judge
     assignee: Judge
-    status: active
+    status: done
     objective: "Audit P1-P4 and approve the session lifecycle boundary."
     constraints:
       - "Read-only."
@@ -320,21 +320,36 @@ tasks:
       - "approved | revise"
       - "P5 corrections"
       - "missing verification"
-    receipt: null
+    receipt:
+      result: done
+      decision: approved_with_constraints
+      full_outcome_complete: false
+      rationale: "P1-P4 tests and walkthroughs are green. P5 may proceed only with an agent-only PTY, explicit CWD policy, structured commands, race-safe lifecycle transitions, and boot orphaning."
+      required_p5_constraints:
+        - "Remove PowerShell -NoExit and do not expose a persistent general shell."
+        - "Add lib/cwd-policy.js with realpath containment and remote allowlist tests."
+        - "Use executable plus argv command descriptors; validate captured native IDs."
+        - "Record starting/running/exited/killed/failed/orphaned, exitCode, and exitReason."
+        - "Prevent duplicate or ambiguous latest-mode resumes."
+        - "Treat pre-restart live records as orphaned, never attachable."
+      missing_verification:
+        - "Empirical ConPTY interrupt and resume behavior for Claude and Hermes."
 
   - id: T106
     type: worker
     assignee: Worker
-    status: queued
+    status: active
     objective: "Implement P5 secure session launch, exit, interrupt, and resume behavior."
     allowed_files:
       - server.js
       - lib/sessions.js
       - lib/storage.js
+      - lib/cwd-policy.js
       - public/index.html
       - public/app.js
       - public/styles.css
       - test/sessions.test.js
+      - test/cwd-policy.test.js
       - docs/goals/agentos-six-phase/state.yaml
     verify:
       - "npm test"
@@ -406,13 +421,7 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T104
+    task: T105
     commands:
-      - cmd: "npm test"
-        status: pass
-      - cmd: "npm run check"
-        status: pass
-      - cmd: "GET /api/recall and GET /api/inbox"
-        status: pass
-      - cmd: "Browser Recall/Inbox walkthrough"
+      - cmd: "Read-only P1-P4 and P5-boundary review"
         status: pass
