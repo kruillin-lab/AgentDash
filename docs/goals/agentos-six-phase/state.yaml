@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T107
+active_task: T108
 
 tasks:
   - id: T000
@@ -399,7 +399,7 @@ tasks:
   - id: T107
     type: worker
     assignee: Worker
-    status: active
+    status: done
     objective: "Implement P6 project/goal launch prefill and measured initial-prompt delivery."
     allowed_files:
       - public/index.html
@@ -415,12 +415,41 @@ tasks:
     stop_if:
       - "Prompt delivery duplicates or fires before readiness."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Added project and goal launch actions, editable CWD/prompt prefill, readiness-aware exact-once prompt delivery, manual fallback, and cancellation."
+      commit: 1f6d7a2
+      changed_files:
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+      commands:
+        - cmd: "npm test"
+          status: pass
+          summary: "38 tests passed."
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "Project and Goal browser prefill walkthrough"
+          status: pass
+        - cmd: "Two Claude automatic prompt trials"
+          status: pass
+          summary: "Sessions 15 and 16 each recorded their unique marker exactly once."
+        - cmd: "Two Hermes automatic prompt trials"
+          status: pass
+          summary: "Sessions 17 and 18 each recorded their unique marker exactly once after readiness."
+        - cmd: "Prompt cancellation trial"
+          status: pass
+          summary: "Session 19 recorded zero copies of the cancelled marker."
+      evidence:
+        - "AgentDash project action prefilled C:\\Users\\kruil\\Documents\\Projects\\AgentDash."
+        - "AgentOS goal action prefilled the project path and Open goal: agentos-six-phase."
+        - "Automatic prompt delivery remains visible and default-on because all four measured launches were clean."
+        - "No browser console errors."
 
   - id: T108
     type: pm
     assignee: PM
-    status: queued
+    status: active
     objective: "Run complete runtime, packaging, protected-source, and quality-gate verification."
     verify:
       - "npm test"
@@ -455,13 +484,15 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T106
+    task: T107
     commands:
       - cmd: "npm test"
         status: pass
       - cmd: "npm run check"
         status: pass
-      - cmd: "Claude and Hermes empirical lifecycle verification"
+      - cmd: "Project and Goal prefill walkthrough"
         status: pass
-      - cmd: "In-app Browser Sessions walkthrough"
+      - cmd: "Two Claude and two Hermes exact-once prompt trials"
+        status: pass
+      - cmd: "Prompt cancellation trial"
         status: pass
