@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T104
+active_task: T105
 
 tasks:
   - id: T000
@@ -258,7 +258,7 @@ tasks:
   - id: T104
     type: worker
     assignee: Worker
-    status: active
+    status: done
     integration_owner: PM
     backend_owner: Worker-Recall-Inbox
     objective: "Implement P4 read-only Recall and Inbox views."
@@ -280,12 +280,38 @@ tasks:
     stop_if:
       - "Recall or inbox source mutation is required."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Added injection-safe local recall search, formatted FTS parsing, read-only one-level inbox discovery, on-demand Recall UI, and 30-second Inbox polling."
+      commit: 3f9cc63
+      changed_files:
+        - server.js
+        - lib/recall.js
+        - lib/inbox.js
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+        - test/recall.test.js
+        - test/inbox.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "Recall query: AgentDash quality gate"
+          status: pass
+        - cmd: "In-app Browser Recall and Inbox walkthrough"
+          status: pass
+      evidence:
+        - "Recall returned CodexBrain/quality-gates/index.md"
+        - "Inbox discovered _archive, drafts, ideas, and scans"
+        - "Cognee path remained disabled"
+        - "No browser console errors"
 
   - id: T105
     type: judge
     assignee: Judge
-    status: queued
+    status: active
     objective: "Audit P1-P4 and approve the session lifecycle boundary."
     constraints:
       - "Read-only."
@@ -380,13 +406,13 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T103
+    task: T104
     commands:
       - cmd: "npm test"
         status: pass
       - cmd: "npm run check"
         status: pass
-      - cmd: "GET /api/schedules"
+      - cmd: "GET /api/recall and GET /api/inbox"
         status: pass
-      - cmd: "Browser Schedules walkthrough"
+      - cmd: "Browser Recall/Inbox walkthrough"
         status: pass
