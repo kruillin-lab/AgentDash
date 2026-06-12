@@ -2,11 +2,38 @@
   "name": "agentdash",
   "version": "1.0.0",
   "description": "",
-  "main": "server.js",
+  "main": "electron.js",
   "scripts": {
     "start": "node server.js",
+    "app": ".\\node_modules\\.bin\\electron.cmd .",
+    "build": "electron-builder --win --x64",
     "install-service": "node install-service.js",
     "remove-service": "node install-service.js remove"
+  },
+  "build": {
+    "appId": "com.agentdash.app",
+    "productName": "AgentDash",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron.js",
+      "server.js",
+      "public/**",
+      "node_modules/**",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": "nsis",
+      "icon": "public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "keywords": [],
   "author": "",
@@ -15,7 +42,10 @@
   "dependencies": {
     "express": "^5.2.1",
     "node-pty": "^1.1.0",
-    "node-windows": "^1.0.0-beta.8",
-    "ws": "^8.20.1"
+    "node-windows": "^1.0.0-beta.8"
+  },
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
   }
 }

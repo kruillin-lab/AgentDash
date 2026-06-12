@@ -18,6 +18,10 @@ const svc = new Service({
   env: [
     { name: 'PORT', value: '3000' },
     { name: 'NODE_ENV', value: 'production' },
+    // Uncomment the next two lines to enable remote access (e.g., over Tailscale).
+    // { name: 'HOST', value: '0.0.0.0' },
+    // { name: 'AGENTDASH_USER', value: 'admin' },
+    // { name: 'AGENTDASH_PASS', value: 'changeme' },
   ],
 });
 
