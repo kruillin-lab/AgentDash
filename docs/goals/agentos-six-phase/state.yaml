@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T102
+active_task: T103
 
 tasks:
   - id: T000
@@ -162,7 +162,7 @@ tasks:
   - id: T102
     type: worker
     assignee: Worker
-    status: active
+    status: done
     objective: "Implement P2 GoalBuddy goal discovery, parsing, and detail UI."
     allowed_files:
       - server.js
@@ -180,12 +180,37 @@ tasks:
     stop_if:
       - "Goal files would need mutation."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Added depth-capped GoalBuddy discovery, exact v2 status mapping, active-task resolution, parse-error containment, Goals cards, and the task detail modal."
+      commit: 0272618
+      changed_files:
+        - server.js
+        - lib/goals.js
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+        - test/goals.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "GET /api/goals"
+          status: pass
+        - cmd: "In-app Browser Goals and task-modal walkthrough"
+          status: pass
+      evidence:
+        - "3 live GoalBuddy state files"
+        - "AgentOS active task T102 resolved"
+        - "No browser console errors"
 
   - id: T103
     type: worker
     assignee: Worker
-    status: queued
+    status: active
+    integration_owner: PM
+    backend_owner: Worker-Schedules
     objective: "Implement P3 read-only Windows scheduled-routine health."
     allowed_files:
       - server.js
@@ -209,6 +234,8 @@ tasks:
     type: worker
     assignee: Worker
     status: queued
+    integration_owner: PM
+    backend_owner: Worker-Recall-Inbox
     objective: "Implement P4 read-only Recall and Inbox views."
     allowed_files:
       - server.js
@@ -328,13 +355,13 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T101
+    task: T102
     commands:
       - cmd: "npm test"
         status: pass
       - cmd: "npm run check"
         status: pass
-      - cmd: "GET /api/projects"
+      - cmd: "GET /api/goals"
         status: pass
-      - cmd: "Browser Projects/Dashboard walkthrough"
+      - cmd: "Browser Goals/task-modal walkthrough"
         status: pass
