@@ -24,6 +24,19 @@ function isLoopbackHost(host) {
   return ['127.0.0.1', 'localhost', '::1'].includes(String(host).toLowerCase());
 }
 
+function isLoopbackAddress(address) {
+  const value = String(address || '').toLowerCase();
+  return value === '127.0.0.1'
+    || value === '::1'
+    || value === '::ffff:127.0.0.1';
+}
+
+function parseSessionId(value) {
+  if (!/^[1-9]\d*$/.test(String(value || ''))) return null;
+  const id = Number(value);
+  return Number.isSafeInteger(id) ? id : null;
+}
+
 if (!isLoopbackHost(HOST) && (!AUTH_USER || !AUTH_PASS)) {
   throw new Error('Non-loopback HOST requires AGENTDASH_USER and AGENTDASH_PASS');
 }
@@ -72,34 +85,71 @@ app.get('/api/sessions', (_req, res) => {
 app.post('/api/sessions', (req, res) => {
   const { agentKey, cwd } = req.body || {};
   try {
-    const sess = sessions.spawn({ agentKey, cwd });
+    const sess = sessions.spawn({
+      agentKey,
+      cwd,
+      remote: !isLoopbackAddress(req.socket.remoteAddress),
+    });
     res.json(sess);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({
+      error: {
+        code: err.code || 'SESSION_LAUNCH_FAILED',
+        message: err.message,
+      },
+    });
   }
 });
 
 app.delete('/api/sessions/:id', (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseSessionId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid session ID' });
   const ok = sessions.kill(id);
   if (!ok) return res.status(404).json({ error: 'Session not running' });
   res.json({ ok: true });
 });
 
 app.get('/api/sessions/:id/output', (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseSessionId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid session ID' });
   const raw = sessions.getOutput(id);
   const lines = raw.split(/\r?\n/).slice(-400);
   res.json({ raw, lines });
 });
 
 app.post('/api/sessions/:id/input', (req, res) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseSessionId(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid session ID' });
   const { data } = req.body || {};
   if (typeof data !== 'string') return res.status(400).json({ error: 'data must be string' });
   const ok = sessions.writeInput(id, data);
   if (!ok) return res.status(404).json({ error: 'Session not running' });
   res.json({ ok: true });
+});
+
+app.post('/api/sessions/:id/interrupt', (req, res) => {
+  const id = parseSessionId(req.params.id);
+  if (!id) {
+    return res.json({
+      ok: false,
+      error: { code: 'INVALID_SESSION_ID', message: 'Session ID must be a positive integer.' },
+    });
+  }
+  return res.json(sessions.interrupt(id));
+});
+
+app.post('/api/sessions/:id/resume', (req, res) => {
+  const id = parseSessionId(req.params.id);
+  if (!id) {
+    return res.json({
+      session: null,
+      mode: null,
+      error: { code: 'INVALID_SESSION_ID', message: 'Session ID must be a positive integer.' },
+    });
+  }
+  return res.json(sessions.resumeSession(id, {
+    remote: !isLoopbackAddress(req.socket.remoteAddress),
+  }));
 });
 
 app.get('/api/cwd-history', (_req, res) => {
@@ -196,3 +246,13 @@ process.on('SIGTERM', shutdown);
 process.on('message', (msg) => {
   if (msg === 'shutdown') shutdown();
 });
+
+module.exports = {
+  app,
+  server,
+  _internals: {
+    isLoopbackAddress,
+    isLoopbackHost,
+    parseSessionId,
+  },
+};

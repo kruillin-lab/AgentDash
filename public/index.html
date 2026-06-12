@@ -140,6 +140,12 @@
         <div class="card-header">
           <button class="btn btn-ghost" id="back-btn">← Back</button>
           <h2 id="detail-title">Session</h2>
+          <div class="detail-actions">
+            <button class="btn btn-interrupt" id="interrupt-detail" hidden>Interrupt</button>
+            <button class="btn btn-danger" id="kill-detail" hidden>Kill</button>
+            <button class="btn" id="resume-detail" hidden>Resume</button>
+            <span class="resume-unsupported" id="resume-unsupported" hidden>Resume unsupported</span>
+          </div>
         </div>
         <div class="detail-meta" id="detail-meta"></div>
         <div class="detail-output" id="terminal-container"></div>

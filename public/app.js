@@ -18,8 +18,15 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
+  let payload = null;
+  try {
+    payload = await res.json();
+  } catch (_) {}
+  if (!res.ok) {
+    const message = payload?.error?.message || payload?.error || `${res.status} ${res.statusText}`;
+    throw new Error(message);
+  }
+  return payload;
 }
 
 async function loadAgents() {
@@ -579,7 +586,7 @@ function renderInbox(data) {
 }
 
 function renderStats() {
-  const active = state.sessions.filter((s) => s.status === 'running').length;
+  const active = state.sessions.filter((s) => s.isLive).length;
   $('#stat-active').textContent = active;
   $('#stat-total').textContent = state.sessions.length;
   const dayAgo = Date.now() - 86400000;
@@ -597,17 +604,27 @@ function sessionRow(s) {
     <span class="session-dot ${s.status}" style="background:${agent.color}"></span>
     <div class="session-meta">
       <div class="session-title">${agent.label} #${s.id}</div>
-      <div class="session-sub">${s.cwd}</div>
+      <div class="session-sub">${escape(s.cwd)}</div>
     </div>
     <div class="session-last">${s.lastOutput ? escape(s.lastOutput.split('\n').pop()) : ''}</div>
     <div class="session-actions">
-      ${s.status === 'running' ? `<button class="btn btn-danger" data-kill="${s.id}">Kill</button>` : ''}
+      ${s.isLive ? `<button class="btn btn-interrupt" data-interrupt="${s.id}">Interrupt</button>` : ''}
+      ${s.isLive ? `<button class="btn btn-danger" data-kill="${s.id}">Kill</button>` : ''}
+      ${s.resumable && !s.isLive ? `<button class="btn" data-resume="${s.id}">Resume</button>` : ''}
+      ${!s.resumable && !s.isLive ? '<span class="resume-unsupported">Resume unsupported</span>' : ''}
     </div>
   `;
   div.addEventListener('click', (e) => {
-    if (e.target.dataset.kill) return;
+    if (e.target.closest('button')) return;
     openDetail(s.id);
   });
+  const interruptBtn = div.querySelector('[data-interrupt]');
+  if (interruptBtn) {
+    interruptBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await interruptSession(s.id);
+    });
+  }
   const killBtn = div.querySelector('[data-kill]');
   if (killBtn) {
     killBtn.addEventListener('click', async (e) => {
@@ -616,13 +633,20 @@ function sessionRow(s) {
       refresh();
     });
   }
+  const resumeBtn = div.querySelector('[data-resume]');
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await resumeSession(s.id);
+    });
+  }
   return div;
 }
 
 function renderActiveSessions() {
   const list = $('#active-sessions');
   list.innerHTML = '';
-  const active = state.sessions.filter((s) => s.status === 'running').reverse();
+  const active = state.sessions.filter((s) => s.isLive).reverse();
   if (active.length === 0) {
     list.innerHTML = '<div class="empty">No active sessions. Click "+ New Session" to launch.</div>';
     return;
@@ -635,7 +659,7 @@ function renderAllSessions() {
   list.innerHTML = '';
   const head = document.createElement('div');
   head.className = 'session-table-row head';
-  head.innerHTML = `<span></span><span>Agent</span><span>Working Dir</span><span>Status</span><span>Duration</span><span>Started</span>`;
+  head.innerHTML = `<span></span><span>Agent</span><span>Working Dir</span><span>Status</span><span>Duration</span><span>Started</span><span>Actions</span>`;
   list.appendChild(head);
   if (state.sessions.length === 0) {
     const e = document.createElement('div');
@@ -652,13 +676,44 @@ function renderAllSessions() {
     row.innerHTML = `
       <span class="session-dot ${s.status}" style="background:${agent.color}"></span>
       <span><b>${agent.label}</b> <span class="mono">#${s.id}</span></span>
-      <span class="mono">${s.cwd}</span>
+      <span class="mono">${escape(s.cwd)}</span>
       <span><span class="status-badge ${s.status}">${s.status}</span></span>
       <span class="mono">${fmtDuration(s.startedAt, s.endedAt)}</span>
       <span class="mono">${fmtTime(s.startedAt)}</span>
+      <span class="session-actions">
+        ${s.isLive ? `<button class="btn btn-interrupt" data-interrupt="${s.id}">Interrupt</button>` : ''}
+        ${s.isLive ? `<button class="btn btn-danger" data-kill="${s.id}">Kill</button>` : ''}
+        ${s.resumable && !s.isLive ? `<button class="btn" data-resume="${s.id}">Resume</button>` : ''}
+        ${!s.resumable && !s.isLive ? '<span class="resume-unsupported">Unsupported</span>' : ''}
+      </span>
     `;
-    row.addEventListener('click', () => openDetail(s.id));
+    row.addEventListener('click', (event) => {
+      if (!event.target.closest('button')) openDetail(s.id);
+    });
+    row.querySelector('[data-interrupt]')?.addEventListener('click', () => interruptSession(s.id));
+    row.querySelector('[data-kill]')?.addEventListener('click', async () => {
+      await api(`/api/sessions/${s.id}`, { method: 'DELETE' });
+      refresh();
+    });
+    row.querySelector('[data-resume]')?.addEventListener('click', () => resumeSession(s.id));
     list.appendChild(row);
+  }
+}
+
+async function interruptSession(id) {
+  const result = await api(`/api/sessions/${id}/interrupt`, { method: 'POST' });
+  if (result.error) throw new Error(result.error.message);
+  await refresh();
+}
+
+async function resumeSession(id) {
+  try {
+    const result = await api(`/api/sessions/${id}/resume`, { method: 'POST' });
+    if (result.error) throw new Error(result.error.message);
+    await refresh();
+    await openDetail(result.session.id);
+  } catch (err) {
+    alert(`Resume failed: ${err.message}`);
   }
 }
 
@@ -765,10 +820,17 @@ async function loadDetail(id) {
   $('#detail-title').textContent = `${agent.label} #${s.id}`;
   $('#detail-meta').innerHTML = `
     <span><b>Status:</b> ${s.status}</span>
-    <span><b>CWD:</b> ${s.cwd}</span>
+    <span><b>CWD:</b> ${escape(s.cwd)}</span>
     <span><b>Duration:</b> ${fmtDuration(s.startedAt, s.endedAt)}</span>
     <span><b>PID:</b> ${s.pid || '—'}</span>
+    <span><b>Exit:</b> ${s.exitCode ?? '—'}</span>
+    ${s.nativeSessionId ? `<span><b>Native ID:</b> ${escape(s.nativeSessionId)}</span>` : ''}
+    ${s.resumedFrom ? `<span><b>Resumed from:</b> #${s.resumedFrom} (${escape(s.resumeMode || 'unknown')})</span>` : ''}
   `;
+  $('#interrupt-detail').hidden = !s.isLive;
+  $('#kill-detail').hidden = !s.isLive;
+  $('#resume-detail').hidden = s.isLive || !s.resumable;
+  $('#resume-unsupported').hidden = s.isLive || s.resumable;
   try {
     const { raw } = await api(`/api/sessions/${id}/output`);
     if (activeTerminal && state.detailId === id) {
@@ -863,6 +925,20 @@ function bindEvents() {
       activeTerminal = null;
     }
     switchView('dashboard');
+  });
+
+  $('#interrupt-detail').addEventListener('click', async () => {
+    if (state.detailId) await interruptSession(state.detailId);
+  });
+
+  $('#kill-detail').addEventListener('click', async () => {
+    if (!state.detailId) return;
+    await api(`/api/sessions/${state.detailId}`, { method: 'DELETE' });
+    await refresh();
+  });
+
+  $('#resume-detail').addEventListener('click', async () => {
+    if (state.detailId) await resumeSession(state.detailId);
   });
   
   $('#open-launch').addEventListener('click', () => {

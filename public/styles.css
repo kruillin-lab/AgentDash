@@ -109,6 +109,8 @@ html, body {
 .btn-ghost:hover { background: var(--surface2); color: var(--text); border-color: transparent; }
 .btn-danger { color: var(--red); border-color: var(--border); }
 .btn-danger:hover { background: rgba(248, 113, 113, 0.1); border-color: var(--red); }
+.btn-interrupt { color: var(--yellow); border-color: var(--border); }
+.btn-interrupt:hover { background: rgba(250, 204, 21, 0.1); border-color: var(--yellow); }
 
 /* Main */
 .main {
@@ -655,7 +657,7 @@ html, body {
 }
 .session-table-row {
   display: grid;
-  grid-template-columns: 24px 1.2fr 1.5fr 0.8fr 0.8fr 120px;
+  grid-template-columns: 24px 1.1fr 1.4fr 0.8fr 0.7fr 90px minmax(150px, auto);
   align-items: center;
   gap: 14px;
   padding: 12px 18px;
@@ -691,6 +693,20 @@ html, body {
 }
 .status-badge.running { background: rgba(74, 222, 128, 0.15); color: var(--green); }
 .status-badge.exited { background: var(--surface3); color: var(--text-faint); }
+.status-badge.starting { background: rgba(96, 165, 250, 0.15); color: var(--blue); }
+.status-badge.killed { background: rgba(250, 204, 21, 0.12); color: var(--yellow); }
+.status-badge.failed { background: rgba(248, 113, 113, 0.14); color: var(--red); }
+.status-badge.orphaned { background: var(--surface3); color: var(--text-dim); }
+.session-dot.starting { background: var(--blue) !important; }
+.session-dot.killed { background: var(--yellow) !important; }
+.session-dot.failed { background: var(--red) !important; }
+.session-dot.orphaned { background: var(--text-dim) !important; }
+.resume-unsupported {
+  align-self: center;
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
 
 /* Activity */
 .activity-list {
@@ -757,8 +773,15 @@ html, body {
   height: 100%;
   flex: 1;
 }
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
 .detail-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 24px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border-soft);
