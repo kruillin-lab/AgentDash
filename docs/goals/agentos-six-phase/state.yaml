@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T103
+active_task: T104
 
 tasks:
   - id: T000
@@ -208,7 +208,7 @@ tasks:
   - id: T103
     type: worker
     assignee: Worker
-    status: active
+    status: done
     integration_owner: PM
     backend_owner: Worker-Schedules
     objective: "Implement P3 read-only Windows scheduled-routine health."
@@ -228,12 +228,36 @@ tasks:
     stop_if:
       - "Any Scheduler write cmdlet is required."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Added one-call read-only Scheduler ingestion, exact six-routine mapping, date/result normalization, 60-second caching, and the Schedules table."
+      commit: 159d3b3
+      changed_files:
+        - server.js
+        - lib/schedules.js
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+        - test/schedules.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "Live getSchedules twice"
+          status: "pass: first 4743ms, cached 0ms"
+        - cmd: "In-app Browser Schedules walkthrough"
+          status: pass
+      evidence:
+        - "6 routines found"
+        - "2 healthy, 2 errors, 2 never-run"
+        - "Future fire times render as in Xm/Xh/Xd"
+        - "No Scheduler writes and no browser console errors"
 
   - id: T104
     type: worker
     assignee: Worker
-    status: queued
+    status: active
     integration_owner: PM
     backend_owner: Worker-Recall-Inbox
     objective: "Implement P4 read-only Recall and Inbox views."
@@ -355,13 +379,13 @@ checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
     result: pass
-    task: T102
+    task: T103
     commands:
       - cmd: "npm test"
         status: pass
       - cmd: "npm run check"
         status: pass
-      - cmd: "GET /api/goals"
+      - cmd: "GET /api/schedules"
         status: pass
-      - cmd: "Browser Goals/task-modal walkthrough"
+      - cmd: "Browser Schedules walkthrough"
         status: pass
