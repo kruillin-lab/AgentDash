@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AgentDash</title>
+<title>AgentOS</title>
 <link rel="stylesheet" href="/styles.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -11,9 +11,12 @@
 <body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand">⚡ AgentDash</div>
+    <div class="brand">AgentOS</div>
     <nav class="nav">
-      <button class="nav-item active" data-view="dashboard">
+      <button class="nav-item active" data-view="projects">
+        <span class="nav-icon">◇</span>Projects
+      </button>
+      <button class="nav-item" data-view="dashboard">
         <span class="nav-icon">▦</span>Dashboard
       </button>
       <button class="nav-item" data-view="sessions">
@@ -30,11 +33,16 @@
 
   <main class="main">
     <header class="topbar">
-      <h1 id="view-title">Dashboard</h1>
+      <h1 id="view-title">Projects</h1>
       <div class="topbar-meta" id="topbar-meta"></div>
     </header>
 
-    <section id="view-dashboard" class="view visible">
+    <section id="view-projects" class="view visible">
+      <div id="projects-header"></div>
+      <div id="projects-grid" class="card-grid"></div>
+    </section>
+
+    <section id="view-dashboard" class="view">
       <div class="cards">
         <div class="card stat">
           <div class="stat-label">Active Sessions</div>

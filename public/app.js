@@ -4,7 +4,8 @@ const state = {
   agents: {},
   sessions: [],
   activity: [],
-  view: 'dashboard',
+  projects: null,
+  view: 'projects',
   detailId: null,
 };
 
@@ -64,12 +65,38 @@ async function refresh() {
   }
 }
 
+async function loadProjects() {
+  try {
+    state.projects = await api('/api/projects');
+  } catch (err) {
+    state.projects = {
+      run: null,
+      projects: [],
+      error: { code: 'NETWORK_ERROR', message: err.message },
+    };
+  }
+  renderProjects(state.projects);
+}
+
 function fmtTime(iso) {
   const d = new Date(iso);
   const h = String(d.getHours()).padStart(2, '0');
   const m = String(d.getMinutes()).padStart(2, '0');
   const s = String(d.getSeconds()).padStart(2, '0');
   return `${h}:${m}:${s}`;
+}
+
+function fmtRelative(iso) {
+  if (!iso) return 'unknown';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return 'unknown';
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function fmtDuration(start, end) {
@@ -93,6 +120,75 @@ function render() {
   renderDashboardActivity();
   renderAllSessions();
   renderFullActivity();
+}
+
+function resultClass(result) {
+  return `result-${String(result || 'INCOMPLETE').replace(/[^A-Z_]/gi, '').toUpperCase()}`;
+}
+
+function renderProjects(data) {
+  const header = $('#projects-header');
+  const grid = $('#projects-grid');
+  if (!header || !grid) return;
+
+  if (!data || data.error) {
+    const error = data?.error || { code: 'NO_DATA', message: 'Project health is unavailable.' };
+    header.innerHTML = `
+      <div class="error-panel">
+        <b>${escape(error.code)}</b>
+        <span>${escape(error.message)}</span>
+      </div>
+    `;
+    grid.innerHTML = '';
+    return;
+  }
+
+  const { run, projects } = data;
+  const counts = run.counts || {};
+  header.innerHTML = `
+    <div class="projects-summary ${resultClass(run.result)}">
+      <div>
+        <div class="eyebrow">Latest global quality gate</div>
+        <div class="projects-result">${escape(run.result)}</div>
+        <div class="projects-run">${escape(run.runId)} · ${fmtRelative(run.finished || run.started)}</div>
+      </div>
+      <div class="summary-counts">
+        <span><b>${counts.projects || 0}</b> projects</span>
+        <span><b>${counts.pass || 0}</b> pass</span>
+        <span><b>${counts.passWithWarnings || 0}</b> warnings</span>
+        <span><b>${counts.fail || 0}</b> failed</span>
+        <span><b>${counts.openWarnings || 0}</b> open</span>
+      </div>
+      ${run.reportPath ? `<button class="btn btn-ghost path-copy" data-copy="${escapeAttr(run.reportPath)}">Copy report path</button>` : ''}
+    </div>
+  `;
+
+  grid.innerHTML = '';
+  for (const project of projects) {
+    const card = document.createElement('article');
+    card.className = `card project-card ${resultClass(project.result)}`;
+    card.innerHTML = `
+      <div class="card-header project-card-header">
+        <h2>${escape(project.label)}</h2>
+        <span class="status-badge ${resultClass(project.result)}">${escape(project.result)}</span>
+      </div>
+      <div class="project-card-body">
+        <div class="project-stats">
+          <span><b>${project.changedFiles}</b> changed</span>
+          <span><b>${project.gateCritical}</b> gate-critical</span>
+          <span><b>${project.testCritical}</b> test-critical</span>
+          <span><b>${project.openWarnings}</b> open warnings</span>
+        </div>
+        <div class="project-meta">
+          <span>${project.hasConfig ? 'Quality gate configured' : 'Missing quality-gate config'}</span>
+          ${project.notes ? `<span>${escape(project.notes)}</span>` : ''}
+        </div>
+        ${project.projectPath ? `<button class="btn btn-ghost path-copy" data-copy="${escapeAttr(project.projectPath)}">${escape(project.projectPath)}</button>` : ''}
+        ${project.reportPath ? `<button class="btn btn-ghost path-copy" data-copy="${escapeAttr(project.reportPath)}">Copy project report</button>` : ''}
+      </div>
+    `;
+    grid.appendChild(card);
+  }
 }
 
 function renderStats() {
@@ -313,12 +409,15 @@ function switchView(view) {
     el.classList.toggle('active', el.dataset.view === view);
   });
   const titles = {
+    projects: 'Projects',
     dashboard: 'Dashboard',
     sessions: 'Sessions',
     activity: 'Activity Feed',
     detail: 'Session Detail',
   };
   $('#view-title').textContent = titles[view] || view;
+  setActiveZonePolling(view);
+  if (view === 'projects') loadProjects();
 }
 
 function escape(s) {
@@ -327,6 +426,22 @@ function escape(s) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function escapeAttr(s) {
+  return escape(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+let activeZoneInterval = null;
+
+function setActiveZonePolling(viewName) {
+  if (activeZoneInterval) {
+    clearInterval(activeZoneInterval);
+    activeZoneInterval = null;
+  }
+  if (viewName === 'projects') {
+    activeZoneInterval = setInterval(loadProjects, 30_000);
+  }
 }
 
 function bindEvents() {
@@ -377,6 +492,20 @@ function bindEvents() {
       alert('Launch failed: ' + err.message);
     }
   });
+
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-copy]');
+    if (!button) return;
+    const value = button.dataset.copy;
+    try {
+      await navigator.clipboard.writeText(value);
+      const original = button.textContent;
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = original; }, 1200);
+    } catch (_) {
+      window.prompt('Copy path:', value);
+    }
+  });
 }
 
 async function init() {
@@ -384,6 +513,8 @@ async function init() {
   await loadAgents();
   await loadCwdHistory();
   await refresh();
+  await loadProjects();
+  setActiveZonePolling(state.view);
   setInterval(refresh, 2000);
 }
 

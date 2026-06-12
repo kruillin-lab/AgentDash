@@ -6,12 +6,23 @@ const path = require('path');
 
 const sessions = require('./lib/sessions');
 const storage = require('./lib/storage');
+const gates = require('./lib/gates');
 
 const app = express();
 const server = http.createServer(app);
 
 const AUTH_USER = process.env.AGENTDASH_USER;
 const AUTH_PASS = process.env.AGENTDASH_PASS;
+const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '127.0.0.1';
+
+function isLoopbackHost(host) {
+  return ['127.0.0.1', 'localhost', '::1'].includes(String(host).toLowerCase());
+}
+
+if (!isLoopbackHost(HOST) && (!AUTH_USER || !AUTH_PASS)) {
+  throw new Error('Non-loopback HOST requires AGENTDASH_USER and AGENTDASH_PASS');
+}
 
 function basicAuth(req, res, next) {
   if (!AUTH_USER || !AUTH_PASS) return next();
@@ -29,7 +40,9 @@ function basicAuth(req, res, next) {
   }
 
   const decoded = Buffer.from(parts[1], 'base64').toString('utf8');
-  const [user, pass] = decoded.split(':');
+  const separator = decoded.indexOf(':');
+  const user = separator >= 0 ? decoded.slice(0, separator) : decoded;
+  const pass = separator >= 0 ? decoded.slice(separator + 1) : '';
   if (user !== AUTH_USER || pass !== AUTH_PASS) {
     res.set('WWW-Authenticate', 'Basic realm="AgentDash"');
     return res.status(401).send('Authentication required');
@@ -94,12 +107,14 @@ app.get('/api/activity', (req, res) => {
   res.json(storage.getActivity(limit));
 });
 
+app.get('/api/projects', async (_req, res) => {
+  res.json(await gates.getProjectHealth());
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, dataFile: storage.DATA_FILE });
 });
 
-const PORT = process.env.PORT || 3001;
-const HOST = process.env.HOST || '127.0.0.1';
 server.listen(PORT, HOST, () => {
   const localUrl = `http://localhost:${PORT}`;
   const bindUrl = `http://${HOST}:${PORT}`;
