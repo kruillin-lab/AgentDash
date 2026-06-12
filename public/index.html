@@ -16,6 +16,9 @@
       <button class="nav-item active" data-view="projects">
         <span class="nav-icon">◇</span>Projects
       </button>
+      <button class="nav-item" data-view="goals">
+        <span class="nav-icon">◎</span>Goals
+      </button>
       <button class="nav-item" data-view="dashboard">
         <span class="nav-icon">▦</span>Dashboard
       </button>
@@ -40,6 +43,11 @@
     <section id="view-projects" class="view visible">
       <div id="projects-header"></div>
       <div id="projects-grid" class="card-grid"></div>
+    </section>
+
+    <section id="view-goals" class="view">
+      <div id="goals-summary"></div>
+      <div id="goals-grid" class="card-grid"></div>
     </section>
 
     <section id="view-dashboard" class="view">
@@ -123,6 +131,20 @@
       <button class="btn btn-ghost" id="cancel-launch">Cancel</button>
       <button class="btn btn-launch" id="confirm-launch">Launch</button>
     </div>
+  </div>
+</div>
+
+<div class="modal" id="goal-modal">
+  <div class="modal-content goal-modal-content">
+    <div class="modal-heading">
+      <div>
+        <div class="eyebrow" id="goal-modal-project"></div>
+        <h2 id="goal-modal-title">Goal</h2>
+      </div>
+      <button class="btn btn-ghost" id="close-goal-modal">Close</button>
+    </div>
+    <div id="goal-modal-meta" class="goal-modal-meta"></div>
+    <div id="goal-modal-tasks" class="task-table"></div>
   </div>
 </div>
 

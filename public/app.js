@@ -5,6 +5,7 @@ const state = {
   sessions: [],
   activity: [],
   projects: null,
+  goals: null,
   view: 'projects',
   detailId: null,
 };
@@ -76,6 +77,19 @@ async function loadProjects() {
     };
   }
   renderProjects(state.projects);
+}
+
+async function loadGoals() {
+  try {
+    state.goals = await api('/api/goals');
+  } catch (err) {
+    state.goals = {
+      goals: [],
+      scanned: { rootsWalked: 0, stateFilesFound: 0, tookMs: 0 },
+      error: { code: 'NETWORK_ERROR', message: err.message },
+    };
+  }
+  renderGoals(state.goals);
 }
 
 function fmtTime(iso) {
@@ -189,6 +203,127 @@ function renderProjects(data) {
     `;
     grid.appendChild(card);
   }
+}
+
+function statusBadge(status) {
+  const value = String(status || 'unknown');
+  return `<span class="status-badge status-${escapeAttr(value)}">${escape(value)}</span>`;
+}
+
+function renderGoals(data) {
+  const summary = $('#goals-summary');
+  const grid = $('#goals-grid');
+  if (!summary || !grid) return;
+
+  if (!data || data.error) {
+    const error = data?.error || { code: 'NO_DATA', message: 'Goals are unavailable.' };
+    summary.innerHTML = `
+      <div class="error-panel">
+        <b>${escape(error.code)}</b>
+        <span>${escape(error.message)}</span>
+      </div>
+    `;
+    grid.innerHTML = '';
+    return;
+  }
+
+  const goals = Array.isArray(data.goals) ? data.goals : [];
+  const active = goals.filter((goal) => goal.status === 'active').length;
+  const blocked = goals.filter((goal) => goal.status === 'blocked').length;
+  summary.innerHTML = `
+    <div class="zone-summary">
+      <div>
+        <div class="eyebrow">GoalBuddy across Projects</div>
+        <div class="zone-summary-title">${goals.length} goals discovered</div>
+      </div>
+      <div class="summary-counts">
+        <span><b>${active}</b> active</span>
+        <span><b>${blocked}</b> blocked</span>
+        <span><b>${data.scanned?.stateFilesFound || 0}</b> state files</span>
+        <span><b>${data.scanned?.tookMs || 0}ms</b> scan</span>
+      </div>
+    </div>
+  `;
+
+  grid.innerHTML = '';
+  if (goals.length === 0) {
+    grid.innerHTML = '<div class="empty card">No GoalBuddy goals found.</div>';
+    return;
+  }
+
+  goals.forEach((goal, index) => {
+    const counts = goal.taskCounts || {};
+    const activeTask = goal.activeTask
+      ? `${goal.activeTask.id} · ${goal.activeTask.type || 'task'}`
+      : 'No active task';
+    const card = document.createElement('article');
+    card.className = `card goal-card status-border-${escapeAttr(goal.status || 'unknown')}`;
+    card.innerHTML = `
+      <div class="card-header goal-card-header">
+        <div>
+          <div class="eyebrow">${escape(goal.project)}</div>
+          <h2>${escape(goal.title || goal.slug)}</h2>
+        </div>
+        ${statusBadge(goal.status)}
+      </div>
+      <div class="goal-card-body">
+        ${goal.parseError ? `<div class="error-panel compact"><b>Parse error</b><span>${escape(goal.parseError)}</span></div>` : ''}
+        <div class="goal-active-task">
+          <span>Active task</span>
+          <b>${escape(activeTask)}</b>
+        </div>
+        <div class="task-counts">
+          <span class="status-done">${counts.done || 0} done</span>
+          <span class="status-active">${counts.active || 0} active</span>
+          <span class="status-queued">${counts.queued || 0} queued</span>
+          <span class="status-blocked">${counts.blocked || 0} blocked</span>
+        </div>
+        <div class="goal-meta">
+          <span>Last verification: ${escape(goal.lastVerification?.result || 'unknown')}</span>
+          <span>${goal.lastVerification?.at ? fmtRelative(goal.lastVerification.at) : 'No timestamp recorded'}</span>
+        </div>
+        <button class="btn" data-goal-index="${index}">View tasks</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function openGoalModal(index) {
+  const goal = state.goals?.goals?.[index];
+  if (!goal) return;
+
+  $('#goal-modal-title').textContent = goal.title || goal.slug;
+  $('#goal-modal-project').textContent = `${goal.project} · ${goal.slug}`;
+  $('#goal-modal-meta').innerHTML = `
+    ${statusBadge(goal.status)}
+    <button class="btn btn-ghost path-copy" data-copy="${escapeAttr(goal.statePath || '')}">Copy state path</button>
+    <button class="btn btn-ghost path-copy" data-copy="${escapeAttr(goal.goalDocPath || '')}">Copy goal path</button>
+  `;
+
+  const tasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+  const table = $('#goal-modal-tasks');
+  table.innerHTML = `
+    <div class="task-row task-head">
+      <span>ID</span><span>Type</span><span>Status</span><span>Objective</span>
+    </div>
+  `;
+  for (const task of tasks) {
+    const row = document.createElement('div');
+    row.className = `task-row ${task.id === goal.activeTask?.id ? 'task-current' : ''}`;
+    row.innerHTML = `
+      <span class="mono">${escape(task.id)}</span>
+      <span>${escape(task.type || '')}</span>
+      <span>${statusBadge(task.status)}</span>
+      <span>${escape(task.objective || '')}</span>
+    `;
+    table.appendChild(row);
+  }
+  if (tasks.length === 0) {
+    table.innerHTML += '<div class="empty">No tasks recorded.</div>';
+  }
+
+  $('#goal-modal').classList.add('visible');
 }
 
 function renderStats() {
@@ -410,6 +545,7 @@ function switchView(view) {
   });
   const titles = {
     projects: 'Projects',
+    goals: 'Goals',
     dashboard: 'Dashboard',
     sessions: 'Sessions',
     activity: 'Activity Feed',
@@ -418,6 +554,7 @@ function switchView(view) {
   $('#view-title').textContent = titles[view] || view;
   setActiveZonePolling(view);
   if (view === 'projects') loadProjects();
+  if (view === 'goals') loadGoals();
 }
 
 function escape(s) {
@@ -441,6 +578,8 @@ function setActiveZonePolling(viewName) {
   }
   if (viewName === 'projects') {
     activeZoneInterval = setInterval(loadProjects, 30_000);
+  } else if (viewName === 'goals') {
+    activeZoneInterval = setInterval(loadGoals, 30_000);
   }
 }
 
@@ -474,6 +613,10 @@ function bindEvents() {
   $('#cancel-launch').addEventListener('click', () => {
     $('#launch-modal').classList.remove('visible');
   });
+
+  $('#close-goal-modal').addEventListener('click', () => {
+    $('#goal-modal').classList.remove('visible');
+  });
   
   $('#confirm-launch').addEventListener('click', async () => {
     const agentKey = $('#agent-select').value;
@@ -494,6 +637,12 @@ function bindEvents() {
   });
 
   document.addEventListener('click', async (event) => {
+    const goalButton = event.target.closest('[data-goal-index]');
+    if (goalButton) {
+      openGoalModal(Number(goalButton.dataset.goalIndex));
+      return;
+    }
+
     const button = event.target.closest('[data-copy]');
     if (!button) return;
     const value = button.dataset.copy;
