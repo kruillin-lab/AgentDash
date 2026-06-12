@@ -6,6 +6,7 @@ const state = {
   activity: [],
   projects: null,
   goals: null,
+  schedules: null,
   view: 'projects',
   detailId: null,
 };
@@ -92,6 +93,23 @@ async function loadGoals() {
   renderGoals(state.goals);
 }
 
+async function loadSchedules() {
+  const summary = $('#schedules-summary');
+  if (summary) {
+    summary.innerHTML = '<div class="loading-panel">Loading scheduled routines…</div>';
+  }
+  try {
+    state.schedules = await api('/api/schedules');
+  } catch (err) {
+    state.schedules = {
+      routines: [],
+      tookMs: 0,
+      error: { code: 'NETWORK_ERROR', message: err.message },
+    };
+  }
+  renderSchedules(state.schedules);
+}
+
 function fmtTime(iso) {
   const d = new Date(iso);
   const h = String(d.getHours()).padStart(2, '0');
@@ -102,15 +120,17 @@ function fmtTime(iso) {
 
 function fmtRelative(iso) {
   if (!iso) return 'unknown';
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms)) return 'unknown';
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
+  const deltaMs = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(deltaMs)) return 'unknown';
+  const isFuture = deltaMs < 0;
+  const seconds = Math.floor(Math.abs(deltaMs) / 1000);
+  if (seconds < 60) return isFuture ? `in ${seconds}s` : `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return isFuture ? `in ${minutes}m` : `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 48) return isFuture ? `in ${hours}h` : `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return isFuture ? `in ${days}d` : `${days}d ago`;
 }
 
 function fmtDuration(start, end) {
@@ -324,6 +344,69 @@ function openGoalModal(index) {
   }
 
   $('#goal-modal').classList.add('visible');
+}
+
+function formatScheduleResult(result) {
+  if (!result) return '<span class="schedule-result muted">unknown</span>';
+  if (result.ok) return '<span class="schedule-result good">OK</span>';
+  if (result.neverRun) return '<span class="schedule-result muted">never run</span>';
+  return `<span class="schedule-result bad">${escape(result.hex || String(result.code))}</span>`;
+}
+
+function renderSchedules(data) {
+  const summary = $('#schedules-summary');
+  const table = $('#schedules-table');
+  if (!summary || !table) return;
+
+  if (!data || data.error) {
+    const error = data?.error || { code: 'NO_DATA', message: 'Schedules are unavailable.' };
+    summary.innerHTML = `
+      <div class="error-panel">
+        <b>${escape(error.code)}</b>
+        <span>${escape(error.message)}</span>
+      </div>
+    `;
+    table.innerHTML = '';
+    return;
+  }
+
+  const routines = Array.isArray(data.routines) ? data.routines : [];
+  const healthy = routines.filter((routine) => routine.found && routine.lastResult?.ok).length;
+  const errors = routines.filter((routine) => routine.found && routine.lastResult && !routine.lastResult.ok && !routine.lastResult.neverRun).length;
+  const missing = routines.filter((routine) => !routine.found).length;
+  summary.innerHTML = `
+    <div class="zone-summary">
+      <div>
+        <div class="eyebrow">Windows Task Scheduler · read-only</div>
+        <div class="zone-summary-title">${routines.length} maintenance routines</div>
+      </div>
+      <div class="summary-counts">
+        <span><b>${healthy}</b> healthy</span>
+        <span><b>${errors}</b> errors</span>
+        <span><b>${missing}</b> missing</span>
+        <span><b>${data.tookMs || 0}ms</b> query</span>
+      </div>
+    </div>
+  `;
+
+  table.innerHTML = `
+    <div class="schedule-row schedule-head">
+      <span>Routine</span><span>Task</span><span>State</span><span>Last run</span><span>Result</span><span>Next fire</span>
+    </div>
+  `;
+  for (const routine of routines) {
+    const row = document.createElement('div');
+    row.className = 'schedule-row';
+    row.innerHTML = `
+      <span><b>${escape(routine.label)}</b></span>
+      <span class="mono">${escape(routine.taskPath)}${escape(routine.taskName)}</span>
+      <span>${routine.found ? statusBadge(routine.state || 'unknown') : statusBadge('not-found')}</span>
+      <span class="mono">${routine.found && routine.lastResult?.neverRun ? '—' : escape(routine.lastRunTime ? fmtRelative(routine.lastRunTime) : '—')}</span>
+      <span>${routine.found ? formatScheduleResult(routine.lastResult) : '<span class="schedule-result bad">not found</span>'}</span>
+      <span class="mono">${escape(routine.nextRunTime ? fmtRelative(routine.nextRunTime) : '—')}</span>
+    `;
+    table.appendChild(row);
+  }
 }
 
 function renderStats() {
@@ -546,6 +629,7 @@ function switchView(view) {
   const titles = {
     projects: 'Projects',
     goals: 'Goals',
+    schedules: 'Schedules',
     dashboard: 'Dashboard',
     sessions: 'Sessions',
     activity: 'Activity Feed',
@@ -555,6 +639,7 @@ function switchView(view) {
   setActiveZonePolling(view);
   if (view === 'projects') loadProjects();
   if (view === 'goals') loadGoals();
+  if (view === 'schedules') loadSchedules();
 }
 
 function escape(s) {
@@ -580,6 +665,8 @@ function setActiveZonePolling(viewName) {
     activeZoneInterval = setInterval(loadProjects, 30_000);
   } else if (viewName === 'goals') {
     activeZoneInterval = setInterval(loadGoals, 30_000);
+  } else if (viewName === 'schedules') {
+    activeZoneInterval = setInterval(loadSchedules, 60_000);
   }
 }
 

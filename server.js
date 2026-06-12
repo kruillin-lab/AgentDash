@@ -8,6 +8,7 @@ const sessions = require('./lib/sessions');
 const storage = require('./lib/storage');
 const gates = require('./lib/gates');
 const goals = require('./lib/goals');
+const schedules = require('./lib/schedules');
 
 const app = express();
 const server = http.createServer(app);
@@ -120,6 +121,18 @@ app.get('/api/goals', async (_req, res) => {
       goals: [],
       scanned: { rootsWalked: 0, stateFilesFound: 0, tookMs: 0 },
       error: { code: 'GOAL_SCAN_FAILED', message: err.message },
+    });
+  }
+});
+
+app.get('/api/schedules', async (_req, res) => {
+  try {
+    res.json(await schedules.getSchedules());
+  } catch (err) {
+    res.json({
+      routines: [],
+      tookMs: 0,
+      error: { code: 'SCHEDULE_QUERY_FAILED', message: err.message },
     });
   }
 });

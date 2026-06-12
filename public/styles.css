@@ -261,6 +261,13 @@ html, body {
   padding: 9px 10px;
   font-size: 11px;
 }
+.loading-panel {
+  padding: 16px 18px;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
 
 .result-PASS { border-color: var(--green); color: var(--green); }
 .result-PASS_WITH_WARNINGS { border-color: var(--yellow); color: var(--yellow); }
@@ -388,6 +395,50 @@ html, body {
   text-transform: uppercase;
 }
 .task-row.task-current { background: rgba(96, 165, 250, 0.07); }
+
+.schedules-table {
+  display: flex;
+  flex-direction: column;
+}
+.schedule-row {
+  display: grid;
+  grid-template-columns: 1.15fr 1.3fr 0.8fr 1fr 0.8fr 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 11px;
+}
+.schedule-row:last-child { border-bottom: none; }
+.schedule-row.schedule-head {
+  color: var(--text-faint);
+  background: var(--surface2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.schedule-row .mono {
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+.schedule-result {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-weight: 600;
+}
+.schedule-result.good { color: var(--green); }
+.schedule-result.bad { color: var(--red); }
+.schedule-result.muted { color: var(--text-faint); }
+.status-badge.status-Ready,
+.status-badge.status-ready { color: var(--green); background: rgba(74, 222, 128, 0.14); }
+.status-badge.status-Running,
+.status-badge.status-running { color: var(--blue); background: rgba(96, 165, 250, 0.14); }
+.status-badge.status-Disabled,
+.status-badge.status-disabled,
+.status-badge.status-not-found { color: var(--text-faint); background: var(--surface3); }
 
 .card {
   background: var(--surface);
