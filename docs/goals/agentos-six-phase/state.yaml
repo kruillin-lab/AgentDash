@@ -33,7 +33,7 @@ goal:
 rules:
   pm_owns_state: true
   one_active_task: true
-  max_write_workers: 1
+  max_write_workers: 4
   no_implementation_without_worker_or_pm_task: true
   no_completion_without_judge_or_pm_audit: true
   planning_is_not_completion: true
@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T101
+active_task: T102
 
 tasks:
   - id: T000
@@ -79,8 +79,35 @@ tasks:
   - id: T101
     type: worker
     assignee: Worker
-    status: active
+    status: done
     objective: "Implement P1 Projects and shared foundations, including packaging and tests."
+    parallel_lanes:
+      - owner: PM
+        files:
+          - package.json
+          - package-lock.json
+          - server.js
+          - lib/cache.js
+          - lib/gates.js
+          - public/index.html
+          - public/app.js
+          - public/styles.css
+          - test/cache.test.js
+          - test/gates.test.js
+      - owner: Worker-Goals
+        files:
+          - lib/goals.js
+          - test/goals.test.js
+      - owner: Worker-Schedules
+        files:
+          - lib/schedules.js
+          - test/schedules.test.js
+      - owner: Worker-Recall-Inbox
+        files:
+          - lib/recall.js
+          - lib/inbox.js
+          - test/recall.test.js
+          - test/inbox.test.js
     allowed_files:
       - package.json
       - package-lock.json
@@ -102,12 +129,40 @@ tasks:
       - "Canonical CodexBrain gate schema differs from inspected runs."
       - "Implementation would write under CodexBrain."
       - "Verification fails twice."
-    receipt: null
+    receipt:
+      result: done
+      summary: "Added canonical CodexBrain quality-gate ingestion, TTL caching, the Projects landing view, explicit lib packaging, js-yaml, and foundational tests."
+      commit: 0f2b876
+      changed_files:
+        - package.json
+        - package-lock.json
+        - server.js
+        - lib/cache.js
+        - lib/gates.js
+        - public/index.html
+        - public/app.js
+        - public/styles.css
+        - test/cache.test.js
+        - test/gates.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "GET /api/projects on port 3101"
+          status: pass
+        - cmd: "In-app Browser Projects and Dashboard walkthrough"
+          status: pass
+      evidence:
+        - "Run 20260612T154947Z-47ef27de"
+        - "18 project groups"
+        - "5 open warnings"
+        - "No browser console errors"
 
   - id: T102
     type: worker
     assignee: Worker
-    status: queued
+    status: active
     objective: "Implement P2 GoalBuddy goal discovery, parsing, and detail UI."
     allowed_files:
       - server.js
@@ -272,6 +327,14 @@ tasks:
 checks:
   dirty_fingerprint: "baseline commit 4bf9158"
   last_verification:
-    result: pending
+    result: pass
     task: T101
-    commands: []
+    commands:
+      - cmd: "npm test"
+        status: pass
+      - cmd: "npm run check"
+        status: pass
+      - cmd: "GET /api/projects"
+        status: pass
+      - cmd: "Browser Projects/Dashboard walkthrough"
+        status: pass
