@@ -245,7 +245,8 @@ tasks:
         - cmd: "npm run check"
           status: pass
         - cmd: "Live getSchedules twice"
-          status: "pass: first 4743ms, cached 0ms"
+          status: pass
+          summary: "First query 4743ms; cached query 0ms."
         - cmd: "In-app Browser Schedules walkthrough"
           status: pass
       evidence:
