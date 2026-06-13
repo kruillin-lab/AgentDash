@@ -531,7 +531,17 @@ tasks:
       - "complete | not_complete"
       - "full_outcome_complete: true | false"
       - "missing evidence"
-    receipt: null
+    receipt:
+      result: revise
+      decision: not_complete
+      full_outcome_complete: false
+      rationale: "Initial final audit rejected stale gate evidence after documentation metadata advanced HEAD from 1deb881 to 84a8f27."
+      missing_evidence:
+        - "Current normal quality gate for 84a8f27."
+        - "Markdown metadata audit for the four changed files."
+      correction:
+        - "Stage 1 and stage 2 metadata apply reached changed=0 and validation passed."
+        - "Normal quality gate PASS run 20260613T015212Z-1e84d43f covers current HEAD 84a8f27."
 
 checks:
   dirty_fingerprint: "baseline commit 4bf9158"
