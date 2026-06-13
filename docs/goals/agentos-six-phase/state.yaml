@@ -62,7 +62,7 @@ visual_board:
     url: "http://goalbuddy.localhost:41737/agentos-six-phase/"
     command: "npx goalbuddy board docs/goals/agentos-six-phase"
 
-active_task: T108
+active_task: T999
 
 tasks:
   - id: T000
@@ -449,7 +449,7 @@ tasks:
   - id: T108
     type: pm
     assignee: PM
-    status: active
+    status: done
     objective: "Run complete runtime, packaging, protected-source, and quality-gate verification."
     verify:
       - "npm test"
@@ -458,12 +458,65 @@ tasks:
       - "Service-mode server startup on port 3000"
       - "npm run build -- --publish=never"
       - "Normal AgentDash quality gate"
-    receipt: null
+    receipt:
+      result: done
+      summary: "Completed final hardening and runtime verification across hosted web, source Electron, packaged Electron, security boundaries, service-account behavior, and protected sources."
+      changed_files:
+        - README.md
+        - electron.js
+        - lib/request-security.js
+        - lib/runtime-context.js
+        - lib/sessions.js
+        - lib/storage.js
+        - package.json
+        - package-lock.json
+        - public/app.js
+        - server.js
+        - test/electron-shutdown.test.js
+        - test/request-security.test.js
+        - test/runtime-context.test.js
+        - test/sessions.test.js
+      commands:
+        - cmd: "npm test"
+          status: pass
+          summary: "56 tests passed."
+        - cmd: "npm run check"
+          status: pass
+        - cmd: "npm audit --omit=dev"
+          status: pass
+          summary: "No production dependency vulnerabilities."
+        - cmd: "HTTP security and API smoke"
+          status: pass
+          summary: "Host and Origin attacks returned 403; guarded API routes and all five data zones passed."
+        - cmd: "In-app Browser all-view walkthrough"
+          status: pass
+          summary: "Projects, Goals, Schedules, Recall, Inbox, Dashboard, Sessions, and Activity rendered without console errors."
+        - cmd: "Hosted mode on port 3000"
+          status: pass
+          summary: "Started in user context with agentLaunchSupported true and user AppData storage."
+        - cmd: "npm run app"
+          status: pass
+          summary: "Source Electron started and served a healthy dashboard."
+        - cmd: "npm run build -- --publish=never"
+          status: pass
+          summary: "Created the unpacked app and AgentDash Setup 1.0.0.exe."
+        - cmd: "Packaged Electron launch"
+          status: pass
+          summary: "Ran as kruil with agentLaunchSupported true."
+        - cmd: "Protected-source comparison"
+          status: pass
+          summary: "All recorded mtimes and sizes matched; protected file hashes recorded in the snapshot note."
+      evidence:
+        - "Durable prompt retry returned duplicate=true without a second PTY write."
+        - "Resume protection covers ancestors, descendants, sibling branches, cycles, and matching native IDs."
+        - "Native IDs are captured only from one complete agent-specific startup line before input."
+        - "Windows LocalSystem and Services sessions return SERVICE_ACCOUNT_UNSUPPORTED."
+        - "Unsafe node-windows service installation was replaced by supported user-context hosted mode and a user-controlled Electron Start at login toggle."
 
   - id: T999
     type: judge
     assignee: Judge
-    status: queued
+    status: active
     objective: "Final audit against the full AgentOS oracle."
     inputs:
       - "All phase receipts and commits"

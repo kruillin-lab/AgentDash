@@ -11,6 +11,8 @@ const goals = require('./lib/goals');
 const schedules = require('./lib/schedules');
 const recall = require('./lib/recall');
 const inbox = require('./lib/inbox');
+const { requestSecurity } = require('./lib/request-security');
+const runtimeContext = require('./lib/runtime-context');
 
 const app = express();
 const server = http.createServer(app);
@@ -69,6 +71,7 @@ function basicAuth(req, res, next) {
 }
 
 app.use(basicAuth);
+app.use(requestSecurity({ host: HOST }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -120,11 +123,12 @@ app.get('/api/sessions/:id/output', (req, res) => {
 app.post('/api/sessions/:id/input', (req, res) => {
   const id = parseSessionId(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid session ID' });
-  const { data } = req.body || {};
+  const { data, deliveryId = null } = req.body || {};
   if (typeof data !== 'string') return res.status(400).json({ error: 'data must be string' });
-  const ok = sessions.writeInput(id, data);
-  if (!ok) return res.status(404).json({ error: 'Session not running' });
-  res.json({ ok: true });
+  const result = sessions.writeInput(id, data, { deliveryId });
+  if (result.error?.code === 'SESSION_NOT_LIVE') return res.status(404).json(result);
+  if (result.error && !result.ok) return res.status(400).json(result);
+  return res.json(result);
 });
 
 app.post('/api/sessions/:id/interrupt', (req, res) => {
@@ -218,7 +222,18 @@ app.get('/api/inbox', async (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, dataFile: storage.DATA_FILE });
+  const agentLaunchSupported = !runtimeContext.isSystemAccount();
+  res.json({
+    ok: true,
+    dataFile: storage.DATA_FILE,
+    agentLaunchSupported,
+    agentLaunchError: agentLaunchSupported
+      ? null
+      : {
+        code: 'SERVICE_ACCOUNT_UNSUPPORTED',
+        message: 'Agent launch requires a logged-in user profile.',
+      },
+  });
 });
 
 server.listen(PORT, HOST, () => {

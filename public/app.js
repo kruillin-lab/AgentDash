@@ -25,7 +25,14 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 async function api(path, opts) {
-  const res = await fetch(path, opts);
+  const options = { ...(opts || {}) };
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    headers.set('X-AgentDash-Request', '1');
+  }
+  options.headers = headers;
+  const res = await fetch(path, options);
   let payload = null;
   try {
     payload = await res.json();
@@ -902,7 +909,10 @@ async function sendPendingPrompt(delivery = pendingPromptDelivery) {
     await api(`/api/sessions/${delivery.sessionId}/input`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: `${delivery.prompt}\r` }),
+      body: JSON.stringify({
+        data: `${delivery.prompt}\r`,
+        deliveryId: delivery.deliveryId,
+      }),
     });
     delivery.delivered = true;
     delivery.message = 'Initial prompt sent once.';
@@ -952,6 +962,8 @@ function preparePromptDelivery(session, prompt, automatic) {
   const delivery = {
     sessionId: session.id,
     agentKey: session.agentKey,
+    deliveryId: globalThis.crypto?.randomUUID?.()
+      || `prompt_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`,
     prompt,
     startedAt: Date.now(),
     cancelled: false,

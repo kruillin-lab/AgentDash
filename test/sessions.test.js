@@ -7,12 +7,17 @@ const sessions = require('../lib/sessions');
 const {
   buildCommand,
   captureNativeSessionId,
+  captureTrustedNativeSessionId,
   chooseResume,
   commandForCandidate,
+  conversationKey,
   exitState,
   getAgent,
   isValidNativeSessionId,
+  isValidDeliveryId,
   normalizeSession,
+  normalizeInputDeliveries,
+  prepareInputDelivery,
 } = sessions._internals;
 
 test('agent registry exposes five resumable agents and launch-only Codex ACP', () => {
@@ -70,10 +75,19 @@ test('native IDs are context-captured and validated per agent', () => {
   assert.equal(captureNativeSessionId('opencode', 'session id: ses_12345678'), 'ses_12345678');
   assert.equal(
     captureNativeSessionId('hermes', 'Session: 20260612_154952_3e9064data-science'),
+    null,
+  );
+  assert.equal(
+    captureNativeSessionId('hermes', 'Session: 20260612_154952_3e9064'),
     '20260612_154952_3e9064',
+  );
+  assert.equal(
+    captureNativeSessionId('claude', `Session ID: ${claudeId}\nSession ID: 223e4567-e89b-42d3-a456-426614174000`),
+    null,
   );
   assert.equal(isValidNativeSessionId('claude', 'not-an-id'), false);
   assert.equal(isValidNativeSessionId('hermes', 'short'), false);
+  assert.equal(captureTrustedNativeSessionId('claude', `Session ID: ${claudeId}`, false), null);
 });
 
 test('legacy records gain additive lifecycle fields', () => {
@@ -98,6 +112,8 @@ test('legacy records gain additive lifecycle fields', () => {
       resumeMode: null,
       exitCode: null,
       exitReason: null,
+      inputDeliveries: [],
+      conversationId: null,
     },
   );
 });
@@ -153,4 +169,98 @@ test('valid native ID selects deterministic by-ID resume', () => {
     nativeSessionId: '123e4567-e89b-42d3-a456-426614174000',
     error: null,
   });
+});
+
+test('resume rejects an active descendant anywhere in the resume chain', () => {
+  const source = normalizeSession({
+    id: 10,
+    agentKey: 'claude',
+    cwd: 'C:\\Projects\\AgentDash',
+    status: 'exited',
+    startedAt: '2026-06-12T10:00:00.000Z',
+    nativeSessionId: '123e4567-e89b-42d3-a456-426614174000',
+  });
+  const child = normalizeSession({
+    ...source,
+    id: 11,
+    resumedFrom: 10,
+    status: 'exited',
+  });
+  const grandchild = normalizeSession({
+    ...source,
+    id: 12,
+    resumedFrom: 11,
+    status: 'running',
+  });
+  assert.equal(chooseResume(source, [source, child, grandchild]).error.code, 'RESUME_ALREADY_ACTIVE');
+});
+
+test('resume rejects another active record with the same native conversation ID', () => {
+  const nativeSessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const source = normalizeSession({
+    id: 20,
+    agentKey: 'claude',
+    cwd: 'C:\\Projects\\AgentDash',
+    status: 'exited',
+    startedAt: '2026-06-12T10:00:00.000Z',
+    nativeSessionId,
+  });
+  const active = normalizeSession({
+    ...source,
+    id: 21,
+    status: 'running',
+  });
+  assert.equal(chooseResume(source, [source, active]).error.code, 'RESUME_ALREADY_ACTIVE');
+});
+
+test('resume rejects an active sibling sharing the same root conversation', () => {
+  const root = normalizeSession({
+    id: 30,
+    agentKey: 'claude',
+    cwd: 'C:\\Projects\\AgentDash',
+    status: 'exited',
+    startedAt: '2026-06-12T10:00:00.000Z',
+  });
+  const source = normalizeSession({ ...root, id: 31, resumedFrom: 30, status: 'exited' });
+  const sibling = normalizeSession({ ...root, id: 32, resumedFrom: 30, status: 'running' });
+  assert.equal(chooseResume(source, [root, source, sibling]).error.code, 'RESUME_ALREADY_ACTIVE');
+});
+
+test('conversation keys are stable across ancestry and cycles', () => {
+  const root = { id: 40, resumedFrom: null, conversationId: null };
+  const child = { id: 41, resumedFrom: 40, conversationId: null };
+  const map = new Map([[40, root], [41, child]]);
+  assert.equal(conversationKey(child, map), 'root:40');
+  const cycleA = { id: 50, resumedFrom: 51, conversationId: null };
+  const cycleB = { id: 51, resumedFrom: 50, conversationId: null };
+  const cycleMap = new Map([[50, cycleA], [51, cycleB]]);
+  assert.equal(conversationKey(cycleA, cycleMap), 'cycle:50,51');
+});
+
+test('delivery IDs are validated, normalized, bounded, and deduplicated', () => {
+  assert.equal(isValidDeliveryId('prompt_12345678'), true);
+  assert.equal(isValidDeliveryId('short'), false);
+  const ids = Array.from({ length: 105 }, (_, index) => `delivery_${String(index).padStart(3, '0')}`);
+  const normalized = normalizeInputDeliveries([
+    'bad',
+    'delivery_010',
+    ...ids,
+    'delivery_104',
+  ]);
+  assert.equal(normalized.length, 100);
+  assert.equal(normalized[0].id, 'delivery_004');
+  assert.equal(normalized.at(-1).id, 'delivery_104');
+
+  const first = prepareInputDelivery([], 'prompt_12345678', 'hello');
+  assert.equal(first.duplicate, false);
+  assert.equal(first.next[0].id, 'prompt_12345678');
+  assert.equal(first.next[0].status, 'reserved');
+  const retry = prepareInputDelivery(first.next, 'prompt_12345678', 'hello');
+  assert.equal(retry.duplicate, true);
+  assert.deepEqual(retry.next, first.next);
+  assert.equal(
+    prepareInputDelivery(first.next, 'prompt_12345678', 'different').error.code,
+    'DELIVERY_PAYLOAD_MISMATCH',
+  );
+  assert.equal(prepareInputDelivery([], 'short', 'hello').error.code, 'INVALID_DELIVERY_ID');
 });
