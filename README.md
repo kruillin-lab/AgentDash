@@ -1,3 +1,13 @@
+---
+tags:
+  - type/readme
+  - project/agentdash
+  - status/active
+type: readme
+project: agentdash
+status: active
+aliases: []
+---
 # AgentDash
 
 AgentDash is a local AgentOS dashboard for project health, GoalBuddy goals, scheduled-routine status,

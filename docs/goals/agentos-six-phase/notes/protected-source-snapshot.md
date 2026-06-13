@@ -1,3 +1,13 @@
+---
+tags:
+  - type/doc
+  - project/agentdash
+  - status/active
+type: doc
+project: agentdash
+status: active
+aliases: []
+---
 # Protected Source Snapshot
 
 Captured before AgentOS implementation on 2026-06-12.

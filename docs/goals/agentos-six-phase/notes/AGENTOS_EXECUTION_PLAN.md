@@ -1,3 +1,13 @@
+---
+tags:
+  - type/doc
+  - project/agentdash
+  - status/active
+type: doc
+project: agentdash
+status: active
+aliases: []
+---
 # AgentOS — Six-Phase Execution Plan
 **Planner:** Fable 5 · **Date:** 2026-06-12 · **Executor:** Claude Opus or Sonnet
 **Repo:** `C:\Users\kruil\Documents\Projects\AgentDash` (directory and package name stay; UI may brand as "AgentOS")

@@ -1,3 +1,13 @@
+---
+tags:
+  - type/doc
+  - project/agentdash
+  - status/active
+type: doc
+project: agentdash
+status: active
+aliases: []
+---
 # AgentOS Six-Phase Execution
 
 ## Objective
