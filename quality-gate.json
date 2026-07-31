@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "agentdash",
-  "profile": "node-electron",
+  "profile": "node-nextjs",
   "paths": {
     "report_dir": ".quality-gate/reports",
     "run_dir": ".quality-gate/runs",
@@ -12,24 +12,28 @@
       "required": ["changed-files"]
     },
     "normal": {
-      "required": ["changed-files", "build"],
+      "required": ["changed-files", "build", "lint", "typecheck"],
       "conditional": ["markdown-audit-if-docs-changed"]
     },
     "release": {
-      "required": ["changed-files", "build", "test-hack-detector"]
+      "required": ["changed-files", "build", "lint", "typecheck"]
     }
   },
   "commands": {
     "build": {
       "shell": "powershell",
-      "command": "Get-ChildItem -Recurse -File -Include *.js | Where-Object { $_.FullName -notmatch '\\\\node_modules\\\\|\\\\dist\\\\' } | ForEach-Object { node --check $_.FullName }",
-      "timeout_seconds": 240
+      "command": "npm run build",
+      "timeout_seconds": 600
     },
-    "package": {
+    "lint": {
       "shell": "powershell",
-      "command": "npm run build -- --publish=never",
-      "timeout_seconds": 600,
-      "skip_reason": "Electron packaging currently requires Visual Studio Spectre-mitigated C++ libraries for node-pty rebuild on this machine."
+      "command": "npm run lint",
+      "timeout_seconds": 180
+    },
+    "typecheck": {
+      "shell": "powershell",
+      "command": "npm run typecheck",
+      "timeout_seconds": 180
     },
     "markdown-audit": {
       "shell": "powershell",
@@ -44,11 +48,13 @@
     },
     "app": {
       "patterns": [
-        "*.js",
-        "lib/**/*.js",
-        "public/**/*.js",
-        "public/**/*.html",
-        "public/**/*.css"
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.css",
+        "next.config.mjs",
+        "tsconfig.json",
+        "tailwind.config.cjs",
+        "postcss.config.cjs"
       ],
       "risk": "app-critical"
     },
@@ -57,11 +63,14 @@
         "quality-gate.json",
         "package.json",
         "package-lock.json",
-        "AGENTS.md",
-        ".codex/**",
-        ".agents/**"
+        ".eslintrc.json",
+        ".gitignore"
       ],
       "risk": "gate-critical"
+    },
+    "legacy": {
+      "patterns": ["legacy/**"],
+      "risk": "normal"
     }
   },
   "exceptions": {
