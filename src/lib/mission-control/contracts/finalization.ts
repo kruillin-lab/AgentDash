@@ -1,15 +1,9 @@
 import { z } from "zod";
 
-import { ArtifactIdSchema, AuthorityIdSchema, CommandIdSchema, DigestSchema, MandateIdSchema, TaskIdSchema, TimestampSchema, canonicalDigest } from "./common";
+import { ArtifactIdSchema, AuthorityIdSchema, CommandIdSchema, DigestSchema, MandateIdSchema, TaskIdSchema, TimestampSchema } from "./common";
+import { MutationManifestInternalSchema, MutationScopeInternalSchema, validateMutationEnvelope } from "./mutation";
 
-const mutationTypeShape = z.enum(["no_change_close", "artifact_delivery", "local_patch", "approved_merge"]);
 const identityRevisionShape = z.object({ identity: z.string().min(1), revision: z.string().min(1), digest: DigestSchema }).strict();
-const mutationManifestShape = z.object({
-  mutation_type: mutationTypeShape,
-  entries: z.array(z.object({ path: z.string().min(1), operation: z.enum(["add", "modify", "delete"]), before_digest: DigestSchema.nullable(), after_digest: DigestSchema.nullable() }).strict()),
-  manifest_digest: DigestSchema,
-  patch_digest: DigestSchema,
-}).strict();
 const expectedPostStateShape = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("digest"), digest: DigestSchema }).strict(),
   z.object({ kind: z.literal("postcondition"), predicate: z.string().min(1), predicate_digest: DigestSchema }).strict(),
@@ -27,8 +21,8 @@ export const FinalizationCommandV1Schema = z.object({
   source: z.object({ artifact_id: ArtifactIdSchema, artifact_digest: DigestSchema, commit_digest: DigestSchema.nullable() }).strict(),
   base: identityRevisionShape,
   target: identityRevisionShape,
-  mutation_scope: z.object({ mutation_type: mutationTypeShape, allowed_path_prefixes: z.array(z.string().min(1)), max_files: z.number().int().nonnegative(), max_diff_bytes: z.number().int().nonnegative(), prohibited_changes: z.array(z.string()) }).strict(),
-  mutation_manifest: mutationManifestShape,
+  mutation_scope: MutationScopeInternalSchema,
+  mutation_manifest: MutationManifestInternalSchema,
   expected_post_state: expectedPostStateShape,
   cas_precondition: z.object({ target_identity: z.string().min(1), expected_revision: z.string().min(1), digest: DigestSchema }).strict(),
   adapter_operation: z.string().min(1),
@@ -36,14 +30,8 @@ export const FinalizationCommandV1Schema = z.object({
   action_authority: z.object({ authority_id: AuthorityIdSchema, authority_digest: DigestSchema }).strict(),
   created_at: TimestampSchema,
 }).strict().superRefine((value, context) => {
-  if (value.mutation_scope.mutation_type !== value.mutation_manifest.mutation_type) context.addIssue({ code: z.ZodIssueCode.custom, message: "mutation manifest exceeds the allowed mutation type" });
-  const manifestDigest = canonicalDigest({ mutation_type: value.mutation_manifest.mutation_type, entries: value.mutation_manifest.entries, patch_digest: value.mutation_manifest.patch_digest });
-  if (value.mutation_manifest.manifest_digest !== manifestDigest) context.addIssue({ code: z.ZodIssueCode.custom, path: ["mutation_manifest", "manifest_digest"], message: "mutation manifest digest does not match its canonical content" });
+  validateMutationEnvelope({ ...value.mutation_scope, mutation_manifest: value.mutation_manifest }, context);
   if (value.cas_precondition.target_identity !== value.target.identity || value.cas_precondition.expected_revision !== value.target.revision || value.cas_precondition.digest !== value.target.digest) context.addIssue({ code: z.ZodIssueCode.custom, message: "CAS precondition does not bind the exact target" });
-  if (value.mutation_manifest.mutation_type === "no_change_close") {
-    const expected = canonicalDigest({ mutation_type: "no_change_close", entries: [] });
-    if (value.mutation_manifest.entries.length !== 0 || value.mutation_manifest.patch_digest !== expected || value.mutation_scope.max_files !== 0 || value.mutation_scope.max_diff_bytes !== 0) context.addIssue({ code: z.ZodIssueCode.custom, message: "no-change close requires the canonical empty mutation" });
-  }
 });
 export type FinalizationCommandV1 = z.infer<typeof FinalizationCommandV1Schema>;
 

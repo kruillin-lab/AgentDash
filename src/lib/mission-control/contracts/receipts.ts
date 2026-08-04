@@ -93,9 +93,5 @@ export const ReconciliationReceiptV1Schema = z.object({
 }).strict().superRefine((value, context) => { if (value.outcome === "found" && [value.work_task_id, value.conversation_id, value.folder_id].some((binding) => binding === null)) context.addIssue({ code: z.ZodIssueCode.custom, message: "found reconciliation requires complete binding identity" }); });
 export type ReconciliationReceiptV1 = z.infer<typeof ReconciliationReceiptV1Schema>;
 
-/** Compatibility aggregate from the original MVP surface. */
-export const FinalReceiptV1Schema = z.object({ schema_version: z.literal("agentdash.final-receipt/v1"), receipt_id: ReceiptIdSchema, task_id: TaskIdSchema, action_receipt_ids: z.array(ReceiptIdSchema), outcome: TaskOutcomeV1Schema, created_at: TimestampSchema }).strict();
-export type FinalReceiptV1 = z.infer<typeof FinalReceiptV1Schema>;
-
 export const AdapterResultEnvelopeV1Schema = z.object({ schema_version: z.literal("agentdash.adapter-result-envelope/v1"), envelope_id: EventIdSchema, command_id: CommandIdSchema, adapter: z.string().min(1), result_digest: DigestSchema, redacted_result: RedactedPayloadV1Schema, observed_at: TimestampSchema }).strict();
 export type AdapterResultEnvelopeV1 = z.infer<typeof AdapterResultEnvelopeV1Schema>;

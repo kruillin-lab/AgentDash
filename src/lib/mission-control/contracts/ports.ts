@@ -111,6 +111,7 @@ export const PersistIntakeInputSchema = z.object({ request_id: RequestIdSchema, 
   for (const routeId of activationRouteIds) referencedRouteIds.add(routeId);
   const evidenceByRoute = new Map<string, z.infer<typeof RouteEvidenceV1Schema>>(value.route_snapshot.map((evidence) => [evidence.route_id, evidence]));
   if (evidenceByRoute.size !== value.route_snapshot.length || evidenceByRoute.size !== referencedRouteIds.size || [...referencedRouteIds].some((routeId) => !evidenceByRoute.has(routeId))) context.addIssue({ code: z.ZodIssueCode.custom, message: "route snapshot must exactly cover every referenced route" });
+  for (const routeId of referencedRouteIds) if (evidenceByRoute.get(routeId)?.status !== "active") context.addIssue({ code: z.ZodIssueCode.custom, message: "intake requires every referenced route proof to be active" });
   for (const phase of value.task_spec.route_plan) if (phase.route_id !== null && evidenceByRoute.get(phase.route_id)?.task_class !== phase.task_class) context.addIssue({ code: z.ZodIssueCode.custom, message: "route snapshot task class must match every TaskSpec route phase" });
   for (const node of value.mandate.action_nodes) {
     if (node.route_id === null) continue;
