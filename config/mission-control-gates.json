@@ -1,0 +1,16 @@
+{
+  "schema_version": "mission_control_gates_v1",
+  "evidence_ttl_seconds": 900,
+  "gates": [
+    { "id": "agentdash_local_authority", "name": "AgentDash local authority" },
+    { "id": "hermes_atomicity", "name": "Hermes atomicity" },
+    { "id": "codeg_replay_safety", "name": "CodeG replay safety" },
+    { "id": "pm_isolation", "name": "PM isolation" },
+    { "id": "workspace_containment", "name": "Workspace containment" },
+    { "id": "route_qualification", "name": "Route qualification" },
+    { "id": "budget_enforcement", "name": "Budget enforcement" },
+    { "id": "verification_independence", "name": "Verification independence" },
+    { "id": "finalization_exactness", "name": "Finalization exactness" },
+    { "id": "reconciliation", "name": "Reconciliation" }
+  ]
+}

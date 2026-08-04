@@ -10,7 +10,8 @@
     "start": "next start -p 3007",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "check": "npm run lint && npm run typecheck && npm run build"
+    "check": "npm run lint && npm run typecheck && npm run build",
+    "mission-control:probe": "node scripts/mission-control/write-gate-manifest.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

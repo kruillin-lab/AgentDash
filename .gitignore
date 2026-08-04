@@ -12,3 +12,4 @@ legacy/node_modules/
 legacy/dist/
 legacy/daemon/
 *.tsbuildinfo
+.agentdash-state/
