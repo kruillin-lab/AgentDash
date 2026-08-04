@@ -23,10 +23,11 @@ import {
   type CEOCommandV1,
   type CEOInputRequestV1,
   type ExecutionMandateV1,
+  type GetActivationQualificationInput,
 } from "../../../lib/mission-control/contracts";
 import type { CommandSessionV1 } from "../security/command-session";
 import type { NonceStore } from "../security/nonce-store";
-import type { HermesPort } from "../ports";
+import type { HermesPort, RouteRegistryPort } from "../ports";
 import { runNoStartChecks } from "../mandate/no-start";
 
 export const CEOInitialApprovalRequestV1Schema = z.object({
@@ -44,7 +45,8 @@ type ActivationResultV1 = z.infer<typeof ActivationResultV1Schema>;
 type PendingActivationSnapshot = Extract<ActivationSnapshotV1, { status: "pending" }>;
 type ActiveActivationSnapshot = Extract<ActivationSnapshotV1, { status: "active" }>;
 type ExecutableActivationSnapshot = PendingActivationSnapshot | ActiveActivationSnapshot;
-type AuthorityHermesPort = Pick<HermesPort, "getActivationSnapshot" | "qualifyActivation" | "lookupActivationByCommand" | "activateMandate">;
+type AuthorityHermesPort = Pick<HermesPort, "getActivationSnapshot" | "lookupActivationByCommand" | "activateMandate">;
+type AuthorityRouteRegistryPort = Pick<RouteRegistryPort, "qualifyActivation">;
 
 export type CEOCommandErrorCode =
   | "invalid_request"
@@ -63,6 +65,7 @@ export class CEOCommandError extends Error {
 
 export interface CEOCommandServiceDependencies {
   hermes: AuthorityHermesPort;
+  routes: AuthorityRouteRegistryPort;
   nonces: NonceStore;
   now?: () => Date;
 }
@@ -156,6 +159,17 @@ function validatePendingDeadlines(snapshot: PendingActivationSnapshot, currentTi
   if (!Number.isSafeInteger(currentTime) || approvalExpiresAt <= currentTime || mandateExpiresAt <= currentTime) {
     fail("activation_expired", "The pending mandate or approval request has expired.");
   }
+}
+
+function sealedRouteRequirements(snapshot: PendingActivationSnapshot): GetActivationQualificationInput["requirements"] {
+  return canonicalizeActivationRoutes(snapshot.readiness.route_snapshot).map((route) => {
+    const phase = snapshot.task_spec.route_plan.find((candidate) => candidate.route_id === route.route_id);
+    const action = snapshot.mandate.action_nodes.find((candidate) => candidate.route_id === route.route_id);
+    if (!phase || !action || action.route_proof_id === null || action.route_proof_digest === null) {
+      fail("activation_conflict", "The pending route requirements are not exactly sealed.");
+    }
+    return { route_id: route.route_id, task_class: phase.task_class, route_proof_id: action.route_proof_id, route_proof_digest: action.route_proof_digest };
+  });
 }
 
 function validateConsumedAt(consumedAt: number, snapshot: ExecutableActivationSnapshot, qualification: ActivationQualificationV1): void {
@@ -345,7 +359,7 @@ export class CEOCommandService {
     validatePendingSource(snapshot);
     const trustedNow = this.now().getTime();
     validatePendingDeadlines(snapshot, trustedNow);
-    const rawQualification = GetActivationQualificationResultSchema.safeParse(await this.dependencies.hermes.qualifyActivation({
+    const rawQualification = GetActivationQualificationResultSchema.safeParse(await this.dependencies.routes.qualifyActivation({
       source_snapshot_digest: snapshot.snapshot_digest,
       request_digest: snapshot.request_digest,
       task_id: snapshot.mandate.task_id,
@@ -353,6 +367,8 @@ export class CEOCommandService {
       mandate_digest: canonicalDigest(snapshot.mandate),
       approval_request_digest: canonicalDigest(snapshot.approval_request),
       budget_policy_digest: canonicalDigest(snapshot.budget_policy),
+      at: new Date(trustedNow).toISOString(),
+      requirements: sealedRouteRequirements(snapshot),
     }));
     if (!rawQualification.success || rawQualification.data.status === "unavailable") fail("activation_unavailable", "Current route qualification is unavailable.");
     if (rawQualification.data.status === "conflict") fail("activation_conflict", "The activation source changed during qualification.");

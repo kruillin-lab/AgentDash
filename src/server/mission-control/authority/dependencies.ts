@@ -15,14 +15,17 @@ const unavailableHermesAuthority = {
   async getActivationSnapshot(): Promise<ActivationSnapshotV1> {
     throw new CEOCommandError("activation_unavailable", "Durable activation persistence is unavailable.");
   },
-  async qualifyActivation(): Promise<never> {
-    throw new CEOCommandError("activation_unavailable", "Coordinated current-route qualification is unavailable.");
-  },
   async lookupActivationByCommand(): Promise<never> {
     throw new CEOCommandError("activation_unavailable", "Durable activation persistence is unavailable.");
   },
   async activateMandate(): Promise<never> {
     throw new CEOCommandError("activation_unavailable", "Durable activation persistence is unavailable.");
+  },
+};
+
+const unavailableRouteRegistry = {
+  async qualifyActivation(): Promise<never> {
+    throw new CEOCommandError("activation_unavailable", "Coordinated current-route qualification is unavailable.");
   },
 };
 
@@ -35,6 +38,6 @@ export function getCEOCommandRouteDependencies(): CEOCommandRouteDependencies {
   const base = getCommandSessionRouteDependencies();
   return {
     ...base,
-    service: new CEOCommandService({ hermes: unavailableHermesAuthority, nonces: createNonceStore() }),
+    service: new CEOCommandService({ hermes: unavailableHermesAuthority, routes: unavailableRouteRegistry, nonces: createNonceStore() }),
   };
 }

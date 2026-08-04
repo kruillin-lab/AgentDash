@@ -79,7 +79,6 @@ export interface HermesPort {
   persistIntake(input: PersistIntakeInput): Promise<PersistIntakeResult>;
   ensureArtifact(input: EnsureArtifactInput): Promise<EnsureArtifactResult>;
   getActivationSnapshot(task_id: string): Promise<ActivationSnapshotV1>;
-  qualifyActivation(input: GetActivationQualificationInput): Promise<GetActivationQualificationResult>;
   lookupActivationByCommand(command_id: string): Promise<LookupActivationByCommandResult>;
   activateMandate(input: ActivateMandateInput): Promise<ActivateMandateResult>;
   prepareAction(input: PrepareActionInput): Promise<PreparedActionResult>;
@@ -115,6 +114,7 @@ export interface AgentBrainPort {
 }
 
 export interface RouteRegistryPort {
+  qualifyActivation(input: GetActivationQualificationInput): Promise<GetActivationQualificationResult>;
   requireLevel5(route_id: RouteId, task_class: TaskClass, at: Timestamp): Promise<RouteEvidenceV1>;
 }
 

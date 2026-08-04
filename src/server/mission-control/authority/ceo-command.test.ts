@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { ActionOutcomeValues, ActivateMandateInputSchema, ActivationSnapshotV1Schema, DigestSchema, RouteEvidenceV1Schema, canonicalActivationQualificationDigest, canonicalDigest, canonicalizeActivationRoutes, type ActivateMandateInput, type ActivationSnapshotV1, type GetActivationQualificationResult } from "../../../lib/mission-control/contracts";
+import { ActionOutcomeValues, ActivateMandateInputSchema, ActivationSnapshotV1Schema, DigestSchema, GetActivationQualificationInputSchema, RouteEvidenceV1Schema, canonicalActivationQualificationDigest, canonicalDigest, canonicalizeActivationRoutes, type ActivateMandateInput, type ActivationSnapshotV1, type GetActivationQualificationInput, type GetActivationQualificationResult } from "../../../lib/mission-control/contracts";
 import { compileIntake, type CompileIntakeInput } from "../intake/compiler";
 import type { CommandSessionV1 } from "../security/command-session";
 import type { NonceConsumption, NonceReplayLookup, NonceStore } from "../security/nonce-store";
@@ -153,19 +153,45 @@ class MemoryNonces implements NonceStore {
   }
 }
 
+class RouteRegistryFake {
+  qualificationCalls = 0;
+  routeRegistryRevision = 1;
+  currentRoutes: ReturnType<typeof routeEvidence>[];
+  qualificationStatus: "qualified" | "conflict" | "unavailable" = "qualified";
+  afterRowsRead: (() => void) | null = null;
+  qualificationInputs: GetActivationQualificationInput[] = [];
+
+  constructor(snapshot: ActivationSnapshotV1) {
+    this.currentRoutes = snapshot.status === "pending" ? structuredClone(snapshot.readiness.route_snapshot) as ReturnType<typeof routeEvidence>[] : [];
+  }
+
+  async qualifyActivation(rawInput: GetActivationQualificationInput): Promise<GetActivationQualificationResult> {
+    this.qualificationCalls += 1;
+    const input = GetActivationQualificationInputSchema.parse(rawInput);
+    this.qualificationInputs.push(structuredClone(input));
+    if (this.qualificationStatus === "conflict") return { status: "conflict" };
+    if (this.qualificationStatus === "unavailable") return { status: "unavailable", reason: "registry unavailable" };
+    const revision = this.routeRegistryRevision;
+    const routesById = new Map(this.currentRoutes.map((route) => [route.route_id, route]));
+    const routes = canonicalizeActivationRoutes(input.requirements.flatMap((requirement) => {
+      const route = routesById.get(requirement.route_id);
+      return route ? [structuredClone(route)] : [];
+    }));
+    this.afterRowsRead?.();
+    if (this.routeRegistryRevision !== revision || routesById.size !== this.currentRoutes.length || routes.length !== input.requirements.length) return { status: "conflict" };
+    return { status: "qualified", route_registry_revision: revision, routes };
+  }
+}
+
 class HermesFake {
   snapshot: ActivationSnapshotV1;
   committedSnapshot: Extract<ActivationSnapshotV1, { status: "active" }> | null = null;
   activation: ActivateMandateInput | null = null;
   activationCalls = 0;
   activationLookupCalls = 0;
-  qualificationCalls = 0;
   activationFailure = false;
   loseResponseAfterWrite = false;
   activationWrites = 0;
-  routeRegistryRevision = 1;
-  currentRoutes: ReturnType<typeof routeEvidence>[];
-  qualificationStatus: "qualified" | "conflict" | "unavailable" = "qualified";
   beforeActivation: (() => void) | null = null;
   activationResponseOverride: ((input: ActivateMandateInput) => unknown) | null = null;
   activationLookupResponseOverride: ((commandId: string) => unknown | Promise<unknown>) | null = null;
@@ -173,16 +199,9 @@ class HermesFake {
   result: ReturnType<typeof this.activationResult> | null = null;
   constructor(snapshot: ActivationSnapshotV1) {
     this.snapshot = snapshot;
-    this.currentRoutes = snapshot.status === "pending" ? structuredClone(snapshot.readiness.route_snapshot) as ReturnType<typeof routeEvidence>[] : [];
   }
   activationResult(input: ActivateMandateInput) { return { schema_version: "agentdash.activation-result/v1" as const, task_id: input.task_id, command_id: input.command.command_id, authority_id: input.grant.authority_id, task_spec_digest: input.task_spec_digest, mandate_digest: input.mandate_digest, source_snapshot_digest: input.qualification.source_snapshot_digest, qualification_digest: input.qualification.qualification_digest, activated_at: input.command.created_at }; }
   async getActivationSnapshot() { return this.snapshot; }
-  async qualifyActivation(): Promise<GetActivationQualificationResult> {
-    this.qualificationCalls += 1;
-    if (this.qualificationStatus === "conflict") return { status: "conflict" as const };
-    if (this.qualificationStatus === "unavailable") return { status: "unavailable" as const, reason: "registry unavailable" };
-    return { status: "qualified" as const, route_registry_revision: this.routeRegistryRevision, routes: structuredClone(this.currentRoutes) };
-  }
   async lookupActivationByCommand(command_id: string) {
     this.activationLookupCalls += 1;
     if (this.activationLookupResponseOverride) return await this.activationLookupResponseOverride(command_id) as any;
@@ -200,7 +219,6 @@ class HermesFake {
         : { status: "conflict" as const };
     }
     const pending = this.snapshot.status === "pending" ? this.snapshot : null;
-    const currentRoutes = structuredClone(this.currentRoutes);
     const conflict = !pending
       || input.expected_snapshot_digest !== pending.snapshot_digest
       || input.request_digest !== pending.request_digest
@@ -208,12 +226,9 @@ class HermesFake {
       || input.task_spec_digest !== canonicalDigest(pending.task_spec)
       || input.mandate_digest !== canonicalDigest(pending.mandate)
       || canonicalDigest(input.source_approval_request) !== canonicalDigest(pending.approval_request)
-      || input.qualification.route_registry_revision !== this.routeRegistryRevision
-      || canonicalDigest(input.qualification.routes) !== canonicalDigest(canonicalizeActivationRoutes(currentRoutes))
       || canonicalDigest(input.qualification.routes) !== input.qualification.route_snapshot_digest
       || input.qualification.source_snapshot_digest !== pending.snapshot_digest
-      || this.commitNow >= Date.parse(input.qualification.valid_until)
-      || currentRoutes.some((route) => route.status !== "active" || Date.parse(route.expires_at) <= this.commitNow);
+      || this.commitNow >= Date.parse(input.qualification.valid_until);
     if (conflict) return { status: "conflict" as const };
     this.activationWrites += 1;
     this.activation = structuredClone(input);
@@ -227,8 +242,8 @@ class HermesFake {
   }
 }
 
-function commandService(hermes: HermesFake, nonces: MemoryNonces, at = now) {
-  return new CEOCommandService({ hermes, nonces, now: () => new Date(at) });
+function commandService(hermes: HermesFake, nonces: MemoryNonces, at = now, routes = new RouteRegistryFake(hermes.snapshot)) {
+  return new CEOCommandService({ hermes, routes, nonces, now: () => new Date(at) });
 }
 
 function activeSnapshotFromActivation(activation: ActivateMandateInput): Extract<ActivationSnapshotV1, { status: "active" }> {
@@ -283,19 +298,27 @@ describe("CEO command service", () => {
     expect(hermes.activationCalls).toBe(1);
   });
 
-  test("qualifies current server-owned route state before consuming activation authority", async () => {
-    const { snapshot, request } = fixture();
+  test("sends trusted time and exact sealed requirements to the route registry", async () => {
+    const { snapshot, request } = routedFixture();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     const nonces = new MemoryNonces();
 
-    await commandService(hermes, nonces).approveInitial(request, session);
+    await commandService(hermes, nonces, now, routes).approveInitial(request, session);
 
-    expect(hermes.qualificationCalls).toBe(1);
-    expect((hermes.activation as ActivateMandateInput & { qualification?: unknown })?.qualification).toMatchObject({
+    const sealedRoute = snapshot.readiness.route_snapshot[0];
+    expect(routes.qualificationInputs).toEqual([{
       source_snapshot_digest: snapshot.snapshot_digest,
-      route_registry_revision: 1,
-      routes: [],
-    });
+      request_digest: snapshot.request_digest,
+      task_id: snapshot.mandate.task_id,
+      task_spec_digest: canonicalDigest(snapshot.task_spec),
+      mandate_digest: canonicalDigest(snapshot.mandate),
+      approval_request_digest: canonicalDigest(snapshot.approval_request),
+      budget_policy_digest: canonicalDigest(snapshot.budget_policy),
+      at: now,
+      requirements: [{ route_id: sealedRoute.route_id, task_class: sealedRoute.task_class, route_proof_id: sealedRoute.route_proof_id, route_proof_digest: sealedRoute.evidence_digest }],
+    }]);
+    expect(hermes.activation?.qualification).toMatchObject({ source_snapshot_digest: snapshot.snapshot_digest, route_registry_revision: 1, routes: [sealedRoute] });
   });
 
   test("canonicalizes route identities with locale-invariant code-unit ordering", () => {
@@ -309,31 +332,64 @@ describe("CEO command service", () => {
     ]);
   });
 
-  test.each(["revoked", "expired"] as const)("blocks a %s current route before nonce consumption", async (condition) => {
+  test.each([
+    ["revoked", (route: ReturnType<typeof routeEvidence>) => { (route as any).status = "revoked"; (route as any).revocation_reason = "revoked after card creation"; }],
+    ["expired", (route: ReturnType<typeof routeEvidence>) => { route.expires_at = "2026-08-04T09:59:59.000Z"; }],
+    ["replaced proof", (route: ReturnType<typeof routeEvidence>) => { (route as any).route_proof_id = "proof-route-execute-replacement"; route.evidence_digest = canonicalDigest({ replaced: true }); }],
+  ] as const)("blocks a %s current route before nonce consumption", async (_condition, mutate) => {
     const { snapshot, request } = routedFixture();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     const nonces = new MemoryNonces();
-    if (condition === "revoked") {
-      (hermes.currentRoutes[0] as any).status = "revoked";
-      (hermes.currentRoutes[0] as any).revocation_reason = "revoked after card creation";
-    } else {
-      hermes.currentRoutes[0].expires_at = "2026-08-04T09:59:59.000Z";
-    }
+    mutate(routes.currentRoutes[0]);
 
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_unavailable" });
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_unavailable" });
+    expect(routes.qualificationCalls).toBe(1);
     expect(nonces.calls).toBe(0);
     expect(hermes.activationWrites).toBe(0);
   });
 
-  test.each([
-    ["proof replacement", (hermes: HermesFake) => { hermes.currentRoutes[0].evidence_digest = canonicalDigest({ replaced: true }); }],
-    ["route-registry ABA", (hermes: HermesFake) => { hermes.routeRegistryRevision += 2; }],
-    ["qualification expiry before commit", (hermes: HermesFake) => { hermes.commitNow = Date.parse(hermes.currentRoutes[0].expires_at); }],
-  ] as const)("atomically rejects %s after qualification with zero activation writes", async (_name, mutate) => {
+  test("rejects a torn registry read before nonce consumption or Hermes activation", async () => {
+    const { snapshot, request } = routedFixture();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    const nonces = new MemoryNonces();
+    routes.afterRowsRead = () => { routes.routeRegistryRevision += 2; };
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
+    expect(routes.qualificationCalls).toBe(1);
+    expect(nonces.calls).toBe(0);
+    expect(hermes.activationCalls).toBe(0);
+    expect(hermes.activationWrites).toBe(0);
+  });
+
+  test("persists and exactly replays revision-R qualification after later registry advances", async () => {
+    const { snapshot, request } = routedFixture();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    const nonces = new MemoryNonces();
+    routes.routeRegistryRevision = 7;
+    hermes.beforeActivation = () => { routes.routeRegistryRevision = 8; };
+
+    const first = await commandService(hermes, nonces, now, routes).approveInitial(request, session);
+    expect(hermes.activation?.qualification.route_registry_revision).toBe(7);
+    expect(hermes.activationWrites).toBe(1);
+    hermes.snapshot = structuredClone(hermes.committedSnapshot!);
+    routes.routeRegistryRevision = 9;
+    (routes.currentRoutes[0] as any).route_proof_id = "proof-route-execute-replacement";
+    routes.currentRoutes[0].evidence_digest = canonicalDigest({ replaced: true });
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(first);
+    expect(routes.qualificationCalls).toBe(1);
+    expect(hermes.activationCalls).toBe(1);
+    expect(hermes.activation?.qualification.route_registry_revision).toBe(7);
+  });
+
+  test("Hermes lifecycle CAS rejects qualification expiry after qualification", async () => {
     const { snapshot, request } = routedFixture();
     const hermes = new HermesFake(snapshot);
     const nonces = new MemoryNonces();
-    hermes.beforeActivation = () => mutate(hermes);
+    hermes.beforeActivation = () => { hermes.commitNow = Date.parse(snapshot.approval_request.expires_at); };
 
     await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
     expect(hermes.activationWrites).toBe(0);
@@ -352,7 +408,6 @@ describe("CEO command service", () => {
     expect(ActivateMandateInputSchema.safeParse(input).success).toBe(false);
 
     const hermes = new HermesFake(snapshot);
-    hermes.currentRoutes = structuredClone(input.qualification.routes);
     await expect(hermes.activateMandate(input)).resolves.toMatchObject({ status: "conflict" });
     expect(hermes.activationWrites).toBe(0);
   });
@@ -376,10 +431,12 @@ describe("CEO command service", () => {
   test("fails closed when coordinated current-route qualification is unavailable", async () => {
     const { snapshot, request } = fixture();
     const hermes = new HermesFake(snapshot);
-    hermes.qualificationStatus = "unavailable";
+    const routes = new RouteRegistryFake(snapshot);
+    routes.qualificationStatus = "unavailable";
     const nonces = new MemoryNonces();
 
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_unavailable" });
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_unavailable" });
+    expect(routes.qualificationCalls).toBe(1);
     expect(nonces.calls).toBe(0);
     expect(hermes.activationWrites).toBe(0);
   });
@@ -387,8 +444,9 @@ describe("CEO command service", () => {
   test("materializes one activation under concurrent identical approvals", async () => {
     const { snapshot, request } = fixture();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     const nonces = new MemoryNonces();
-    const service = commandService(hermes, nonces);
+    const service = commandService(hermes, nonces, now, routes);
 
     const [first, second] = await Promise.all([service.approveInitial(request, session), service.approveInitial(structuredClone(request), structuredClone(session))]);
 
@@ -400,17 +458,18 @@ describe("CEO command service", () => {
   test("reconstructs byte-identical command and grant after response loss", async () => {
     const { snapshot, request } = fixture();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     const nonces = new MemoryNonces();
-    const service = commandService(hermes, nonces);
+    const service = commandService(hermes, nonces, now, routes);
     const first = await service.approveInitial(request, session);
     const activation = structuredClone(hermes.activation!);
     hermes.snapshot = structuredClone(hermes.committedSnapshot!);
 
-    await expect(commandService(hermes, nonces, "2026-08-04T10:00:31.000Z").approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(first);
+    await expect(commandService(hermes, nonces, "2026-08-04T10:00:31.000Z", routes).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(first);
     expect(hermes.activation).toEqual(activation);
     expect(hermes.activationCalls).toBe(1);
     expect(nonces.records.size).toBe(1);
-    expect(hermes.qualificationCalls).toBe(1);
+    expect(routes.qualificationCalls).toBe(1);
   });
 
   test("requires replayed_same nonce state for an active exact-command replay", async () => {
@@ -529,12 +588,13 @@ describe("CEO command service", () => {
     const { snapshot, request } = twoRoutedFixture();
     const nonces = new MemoryNonces();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     hermes.activationFailure = true;
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss");
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss");
     hermes.activationFailure = false;
-    hermes.currentRoutes.reverse();
+    routes.currentRoutes.reverse();
 
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).resolves.toMatchObject({ task_id: snapshot.mandate.task_id });
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).resolves.toMatchObject({ task_id: snapshot.mandate.task_id });
     expect(hermes.activationWrites).toBe(1);
     expect(nonces.records.size).toBe(1);
   });
@@ -543,17 +603,18 @@ describe("CEO command service", () => {
     const { snapshot, request } = twoRoutedFixture();
     const nonces = new MemoryNonces();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     hermes.loseResponseAfterWrite = true;
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss after durable write");
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss after durable write");
     const materialized = structuredClone(hermes.result);
-    hermes.currentRoutes.reverse();
+    routes.currentRoutes.reverse();
     hermes.activationFailure = true;
 
-    await expect(commandService(hermes, nonces).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(materialized);
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(materialized);
     expect(hermes.activationWrites).toBe(1);
     expect(hermes.activationCalls).toBe(1);
     expect(hermes.activationLookupCalls).toBe(1);
-    expect(hermes.qualificationCalls).toBe(2);
+    expect(routes.qualificationCalls).toBe(2);
     expect(nonces.records.size).toBe(1);
   });
 

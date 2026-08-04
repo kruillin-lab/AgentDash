@@ -17,6 +17,8 @@ import {
   ReceiptIdSchema,
   RedactedPayloadV1Schema,
   RequestIdSchema,
+  RouteIdSchema,
+  RouteProofIdSchema,
   RunIdSchema,
   TaskIdSchema,
   TimestampSchema,
@@ -28,7 +30,7 @@ import { ActionAuthorityV1Schema, ActionCommandV1Schema, ApprovalGrantV1Schema, 
 import { ExecutionMandateV1Schema, approvalGrantFulfillsMandate } from "./mandate";
 import { BudgetPolicySnapshotV1Schema, IntakeReadinessV1Schema } from "./intake";
 import { ActionOutcomeV1Schema, TaskOutcomeV1Schema } from "./outcomes";
-import { RouteEvidenceV1Schema } from "./routes";
+import { RouteEvidenceV1Schema, TaskClassSchema } from "./routes";
 import { TaskSpecV1Schema } from "./task";
 
 const activationShape = z.discriminatedUnion("kind", [
@@ -125,7 +127,7 @@ const activationQualificationSubject = (value: {
   valid_until: value.valid_until,
 });
 
-export function canonicalizeActivationRoutes(routes: readonly z.infer<typeof RouteEvidenceV1Schema>[]): z.infer<typeof RouteEvidenceV1Schema>[] {
+function canonicalizeRouteIdentities<T extends { route_id: string }>(routes: readonly T[]): T[] {
   return [...routes].sort((left, right) => {
     const length = Math.min(left.route_id.length, right.route_id.length);
     for (let index = 0; index < length; index += 1) {
@@ -134,6 +136,10 @@ export function canonicalizeActivationRoutes(routes: readonly z.infer<typeof Rou
     }
     return left.route_id.length - right.route_id.length;
   });
+}
+
+export function canonicalizeActivationRoutes(routes: readonly z.infer<typeof RouteEvidenceV1Schema>[]): z.infer<typeof RouteEvidenceV1Schema>[] {
+  return canonicalizeRouteIdentities(routes);
 }
 
 export function canonicalActivationQualificationDigest(value: Parameters<typeof activationQualificationSubject>[0]): z.infer<typeof DigestSchema> {
@@ -165,13 +171,36 @@ export const ActivationQualificationV1Schema = z.object({
 });
 export type ActivationQualificationV1 = z.infer<typeof ActivationQualificationV1Schema>;
 
-export const GetActivationQualificationInputSchema = z.object({ source_snapshot_digest: DigestSchema, request_digest: DigestSchema, task_id: TaskIdSchema, task_spec_digest: DigestSchema, mandate_digest: DigestSchema, approval_request_digest: DigestSchema, budget_policy_digest: DigestSchema }).strict();
+const activationRouteRequirementSchema = z.object({
+  route_id: RouteIdSchema,
+  task_class: TaskClassSchema,
+  route_proof_id: RouteProofIdSchema,
+  route_proof_digest: DigestSchema,
+}).strict();
+export const GetActivationQualificationInputSchema = z.object({
+  source_snapshot_digest: DigestSchema,
+  request_digest: DigestSchema,
+  task_id: TaskIdSchema,
+  task_spec_digest: DigestSchema,
+  mandate_digest: DigestSchema,
+  approval_request_digest: DigestSchema,
+  budget_policy_digest: DigestSchema,
+  at: TimestampSchema,
+  requirements: z.array(activationRouteRequirementSchema),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.requirements.map((requirement) => requirement.route_id)).size !== value.requirements.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ["requirements"], message: "activation route requirements must be distinct by route identity" });
+  if (canonicalDigest(value.requirements) !== canonicalDigest(canonicalizeRouteIdentities(value.requirements))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["requirements"], message: "activation route requirements must use canonical route-id ordering" });
+});
 export type GetActivationQualificationInput = z.infer<typeof GetActivationQualificationInputSchema>;
 export const GetActivationQualificationResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("qualified"), route_registry_revision: z.number().int().nonnegative().safe(), routes: z.array(RouteEvidenceV1Schema) }).strict(),
   z.object({ status: z.literal("conflict") }).strict(),
   z.object({ status: z.literal("unavailable"), reason: z.string().min(1).max(512) }).strict(),
-]);
+]).superRefine((value, context) => {
+  if (value.status !== "qualified") return;
+  if (new Set(value.routes.map((route) => route.route_id)).size !== value.routes.length) context.addIssue({ code: z.ZodIssueCode.custom, path: ["routes"], message: "qualified route rows must be distinct by route identity" });
+  if (canonicalDigest(value.routes) !== canonicalDigest(canonicalizeActivationRoutes(value.routes))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["routes"], message: "qualified route rows must use canonical route-id ordering" });
+});
 export type GetActivationQualificationResult = z.infer<typeof GetActivationQualificationResultSchema>;
 
 export const ActivationResultV1Schema = z.object({ schema_version: z.literal("agentdash.activation-result/v1"), task_id: TaskIdSchema, command_id: CommandIdSchema, authority_id: AuthorityIdSchema, task_spec_digest: DigestSchema, mandate_digest: DigestSchema, source_snapshot_digest: DigestSchema, qualification_digest: DigestSchema, activated_at: TimestampSchema }).strict();
