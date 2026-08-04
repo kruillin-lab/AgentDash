@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,8 +6,8 @@ import { afterAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 
 import { runCommand } from "./command";
-import { PM_RESPONSE_TEXT, createHermesPM } from "./pm";
 import { buildPMEnvironment } from "./pm-environment";
+import { PMConversationAtomV1Schema } from "./pm";
 import { buildPMPrompt } from "../mission-control/pm-prompt";
 
 const liveEnabled = process.env.HERMES_PM_LIVE === "1";
@@ -96,6 +96,7 @@ describeLive("isolated luisos-pm live containment", () => {
       expect(result).toMatchObject({ code: 0, timedOut: false, aborted: false, outputLimitExceeded: false });
       const output = z.object({
         response_code: z.enum(["conversation_acknowledged", "clarification_required", "proposal_drafted", "request_outside_pm_scope"]),
+        conversation_atoms: z.array(PMConversationAtomV1Schema).max(4),
         proposal: z.object({ task_id: z.null(), intent: z.enum(["conversation_only", "create_task"]) }).passthrough(),
       }).strict().parse(JSON.parse(result.stdout) as unknown);
       expect(output.response_code === "proposal_drafted" ? output.proposal.intent : "conversation_only").toBe(output.proposal.intent);
@@ -103,28 +104,6 @@ describeLive("isolated luisos-pm live containment", () => {
     }
     expect(await readdir(sideEffectTarget)).toEqual([]);
 
-    const proofPath = process.env.HERMES_PM_SIGNED_PROOF_PATH;
-    const trustedIssuerKeyId = process.env.HERMES_PM_TRUSTED_ISSUER_KEY_ID;
-    const trustedIssuerPublicKeyPath = process.env.HERMES_PM_TRUSTED_ISSUER_PUBLIC_KEY_PATH;
-    if (!proofPath || !trustedIssuerKeyId || !trustedIssuerPublicKeyPath) {
-      throw new Error("No reviewed trusted PM isolation-proof issuer is configured; unsigned live evidence remains NO-GO.");
-    }
-    const pm = createHermesPM({
-      executable,
-      allowedExecutables: [executable],
-      executableVersion,
-      profileHome,
-      isolationProofPath: proofPath,
-      inferenceModel,
-      inferenceProvider,
-      credentialSetRef,
-      credentialAttestationSha256,
-      trustedIssuer: {
-        keyId: trustedIssuerKeyId,
-        publicKeyPem: await readFile(trustedIssuerPublicKeyPath, "utf8"),
-      },
-    });
-    const output = await pm.turn({ message: "Help me clarify the release goal.", history: [], reviewed_recall: [], capability_facts: [] });
-    expect(Object.values(PM_RESPONSE_TEXT)).toContain(output.text);
+    throw new Error("No trusted atomic VerifiedHermesLaunchPort is configured; live PM inference remains NO-GO.");
   }, 10 * 60 * 1_000);
 });

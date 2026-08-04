@@ -56,6 +56,111 @@ describe("runCommand", () => {
     await expect(pending).resolves.toMatchObject({ aborted: true });
   });
 
+  // Production break caught: on POSIX, the direct child can close after SIGTERM while a
+  // resistant descendant keeps the detached process group alive.
+  test("does not let POSIX direct-child close substitute for process-group extinction", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4250, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    let groupAlive = true;
+    const terminateTree = vi.fn(async (_target: unknown, force: boolean) => {
+      if (force) groupAlive = false;
+      else queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      probeTree: vi.fn(async () => groupAlive),
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 100,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGTERM" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
+  test("treats a POSIX EPERM group probe as still alive and fails closed after SIGKILL", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4251, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === 0) throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+      return true;
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+    child.emit("close", null, "SIGTERM");
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(true);
+  });
+
+  test("fails closed when a POSIX process-group probe returns an unexpected error", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4252, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === 0) throw Object.assign(new Error("probe failed"), { code: "EIO" });
+      return true;
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(true);
+  });
+
+  test("uses the spawn-time POSIX group id when signal and probe race with ESRCH", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4253, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === "SIGTERM") queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+      throw Object.assign(new Error("group is already gone"), { code: "ESRCH" });
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 100,
+      terminationForceMs: 100,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    child.pid = 9_999;
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGTERM" });
+    expect(killProcess.mock.calls.map((call) => call[0])).toEqual([-4253, -4253]);
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(false);
+  });
+
   // Production break caught: a graceful tree-stop acknowledgement without child close could be
   // mistaken for completion instead of escalating to a bounded forced tree termination.
   test("escalates once when graceful tree termination does not produce close", async () => {
@@ -182,7 +287,7 @@ describe("runCommand", () => {
   test("confirms the complete process tree is gone before a timeout resolves", async () => {
     const directory = await temporaryDirectory();
     const sentinel = join(directory, "grandchild-survived.txt");
-    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 1_500)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 1_500)`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
@@ -206,7 +311,7 @@ describe("runCommand", () => {
     const directory = await temporaryDirectory();
     const ready = join(directory, "parent-ready.txt");
     const sentinel = join(directory, "abort-grandchild-survived.txt");
-    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       "const fs = require('node:fs')",
@@ -235,7 +340,7 @@ describe("runCommand", () => {
   test("confirms the complete process tree is gone before output-limit resolution", async () => {
     const directory = await temporaryDirectory();
     const sentinel = join(directory, "output-grandchild-survived.txt");
-    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,

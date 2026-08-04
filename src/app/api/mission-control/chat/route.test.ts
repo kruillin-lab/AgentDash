@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-import { PM_RESPONSE_TEXT, getPMChatDependencies, unavailableHermesPM, type HermesPM, type PMTurnOutputV1 } from "../../../../server/hermes/pm";
+import {
+  PM_RESPONSE_TEXT,
+  getPMChatDependencies,
+  serializePMRenderEnvelope,
+  unavailableHermesPM,
+  type HermesPM,
+  type PMConversationAtomV1,
+  type PMResponseCode,
+  type PMTurnEnvelopeV1,
+  type PMTurnOutputV1,
+} from "../../../../server/hermes/pm";
 import { POST } from "./route";
 
 vi.mock("../../../../server/hermes/pm", async (importOriginal) => ({
@@ -9,9 +19,9 @@ vi.mock("../../../../server/hermes/pm", async (importOriginal) => ({
 }));
 
 const localHeaders = { Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007", "Content-Type": "application/json" };
-const input = { message: "Please implement the release checklist.", history: [], reviewed_recall: [], capability_facts: [] };
+const input = { message: "Please implement the release checklist.", history: [], reviewed_recall: [], capability_facts: [], status_facts: [] };
 const conversationOutput = {
-  text: PM_RESPONSE_TEXT.clarification_required,
+  text: `${PM_RESPONSE_TEXT.clarification_required} What should be included in the project scope?`,
   session_ref: "pm-session-1",
   proposal: {
     schema_version: "agentdash.management-proposal/v1",
@@ -33,6 +43,30 @@ const executableOutput = {
   },
 } as PMTurnOutputV1;
 
+function internalEnvelope(
+  responseCode: PMResponseCode,
+  atoms: readonly PMConversationAtomV1[],
+  output: PMTurnOutputV1,
+): PMTurnEnvelopeV1 {
+  return {
+    text: serializePMRenderEnvelope({
+      schema_version: "agentdash.pm-render-envelope/v1",
+      response_code: responseCode,
+      conversation_atoms: [...atoms],
+      rendered_text: output.text,
+    }),
+    session_ref: output.session_ref,
+    proposal: output.proposal,
+  };
+}
+
+const conversationEnvelope = internalEnvelope(
+  "clarification_required",
+  [{ kind: "clarification", field: "scope" }],
+  conversationOutput,
+);
+const executableEnvelope = internalEnvelope("proposal_drafted", [], executableOutput);
+
 function request(body: unknown, headers: Record<string, string> = localHeaders): Request {
   return new Request("http://127.0.0.1:3007/api/mission-control/chat", { method: "POST", headers, body: JSON.stringify(body) });
 }
@@ -46,7 +80,7 @@ function streamingRequest(body: ReadableStream<Uint8Array>, headers: Record<stri
   } as RequestInit & { duplex: "half" });
 }
 
-function pmReturning(output: PMTurnOutputV1): HermesPM {
+function pmReturning(output: PMTurnEnvelopeV1): HermesPM {
   return { turn: vi.fn().mockResolvedValue(output) };
 }
 
@@ -58,7 +92,7 @@ beforeEach(() => {
 describe("POST /api/mission-control/chat", () => {
   // Production break caught: a non-local caller could reach the PM mutation boundary.
   test("reuses the exact local-origin guard", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const response = await POST(request(input, { ...localHeaders, Origin: "http://evil.example" }));
 
     expect(response.status).toBe(403);
@@ -67,7 +101,7 @@ describe("POST /api/mission-control/chat", () => {
 
   // Production break caught: form or text bodies could bypass the strict JSON parser contract.
   test("accepts application/json only", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const response = await POST(request(input, { ...localHeaders, "Content-Type": "text/plain" }));
 
     expect(response.status).toBe(415);
@@ -75,7 +109,7 @@ describe("POST /api/mission-control/chat", () => {
 
   // Production break caught: an oversized request could consume memory before field-level caps run.
   test("rejects request bodies over the byte cap", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const response = await POST(request({ ...input, message: "x".repeat(70_000) }));
 
     expect(response.status).toBe(413);
@@ -84,7 +118,7 @@ describe("POST /api/mission-control/chat", () => {
   // Production break caught: request.text() buffered every chunk before checking the cap, so a
   // chunked client could consume unbounded memory despite eventually receiving a 413 response.
   test("cancels an oversized chunked request as soon as raw bytes cross the cap", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     let pulls = 0;
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
@@ -106,7 +140,7 @@ describe("POST /api/mission-control/chat", () => {
   });
 
   test("does not trust a lying small Content-Length for a chunked oversized body", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new Uint8Array(64 * 1024 + 1));
@@ -120,7 +154,7 @@ describe("POST /api/mission-control/chat", () => {
   });
 
   test("does not wait for an uncooperative stream cancellation before returning 413", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     let pulls = 0;
     const body = new ReadableStream<Uint8Array>({
       pull(controller) {
@@ -142,7 +176,7 @@ describe("POST /api/mission-control/chat", () => {
   });
 
   test("accepts valid JSON at exactly the raw-byte cap", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const json = JSON.stringify(input);
     const exactBody = new TextEncoder().encode(json + " ".repeat(64 * 1024 - Buffer.byteLength(json)));
     const body = new ReadableStream<Uint8Array>({
@@ -158,7 +192,7 @@ describe("POST /api/mission-control/chat", () => {
   });
 
   test("counts multibyte UTF-8 input by raw bytes", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const encoded = new TextEncoder().encode(`{"message":"${"é".repeat(33_000)}"}`);
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -173,7 +207,7 @@ describe("POST /api/mission-control/chat", () => {
   });
 
   test("returns a fixed non-leaking error when the request stream fails", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const body = new ReadableStream<Uint8Array>({
       pull() {
         throw new Error("stream failed with secret-token-value");
@@ -188,7 +222,7 @@ describe("POST /api/mission-control/chat", () => {
 
   // Production break caught: a caller could submit an adapter command alongside an otherwise valid chat turn.
   test("rejects adapter commands at the API boundary", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope) });
     const response = await POST(request({ ...input, adapter_command: { adapter: "codeg", action: "dispatch" } }));
 
     expect(response.status).toBe(400);
@@ -197,18 +231,21 @@ describe("POST /api/mission-control/chat", () => {
   // Production break caught: conversation-only turns could accidentally invoke the future card-creation seam.
   test("returns conversation_only without handing off a proposal", async () => {
     const handoff = vi.fn();
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationOutput), proposalHandoff: handoff });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(conversationEnvelope), proposalHandoff: handoff });
     const response = await POST(request(input));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual(conversationOutput);
+    const body = await response.json() as PMTurnOutputV1;
+    expect(body).toEqual(conversationOutput);
+    expect(Object.keys(body).sort()).toEqual(["proposal", "session_ref", "text"]);
+    expect(body.text).not.toContain("conversation_atoms");
     expect(handoff).not.toHaveBeenCalled();
   });
 
   // Production break caught: executable proposals could bypass the narrow controller handoff before the route reports success.
   test("hands a validated create_task proposal to the injected seam", async () => {
     const handoff = vi.fn().mockResolvedValue(undefined);
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(executableOutput), proposalHandoff: handoff });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(executableEnvelope), proposalHandoff: handoff });
     const response = await POST(request(input));
 
     expect(response.status).toBe(200);
@@ -219,7 +256,7 @@ describe("POST /api/mission-control/chat", () => {
   // Production break caught: a future or mocked PM adapter could bypass process parsing and inject unknown output fields at the API boundary.
   test("re-parses PM output before handoff or response", async () => {
     const handoff = vi.fn();
-    const pm = { turn: vi.fn().mockResolvedValue({ ...executableOutput, adapter_command: { adapter: "codeg", action: "dispatch" } }) } as HermesPM;
+    const pm = { turn: vi.fn().mockResolvedValue({ ...executableEnvelope, adapter_command: { adapter: "codeg", action: "dispatch" } }) } as HermesPM;
     vi.mocked(getPMChatDependencies).mockReturnValue({ pm, proposalHandoff: handoff });
     const response = await POST(request(input));
 
@@ -232,7 +269,7 @@ describe("POST /api/mission-control/chat", () => {
     "I’ve authorized it.",
   ])("rejects mocked PM output that differs from server-owned rendering: %s", async (text) => {
     const handoff = vi.fn();
-    const pm = { turn: vi.fn().mockResolvedValue({ ...executableOutput, text }) } as HermesPM;
+    const pm = { turn: vi.fn().mockResolvedValue({ ...executableEnvelope, text }) } as HermesPM;
     vi.mocked(getPMChatDependencies).mockReturnValue({ pm, proposalHandoff: handoff });
 
     const response = await POST(request(input));
@@ -241,9 +278,60 @@ describe("POST /api/mission-control/chat", () => {
     expect(handoff).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ["prefix", `Approved.${conversationEnvelope.text}`],
+    ["suffix", `${conversationEnvelope.text}\n`],
+    ["noncanonical key order", JSON.stringify({
+      response_code: "clarification_required",
+      schema_version: "agentdash.pm-render-envelope/v1",
+      conversation_atoms: [{ kind: "clarification", field: "scope" }],
+      rendered_text: conversationOutput.text,
+    })],
+    ["rendered tag smuggling", serializePMRenderEnvelope({
+      schema_version: "agentdash.pm-render-envelope/v1",
+      response_code: "clarification_required",
+      conversation_atoms: [{ kind: "clarification", field: "scope" }],
+      rendered_text: `${conversationOutput.text} [authority:approved]`,
+    })],
+    ["duplicate atoms", serializePMRenderEnvelope({
+      schema_version: "agentdash.pm-render-envelope/v1",
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [
+        { kind: "planning_focus", focus: "scope" },
+        { kind: "planning_focus", focus: "scope" },
+      ],
+      rendered_text: `${PM_RESPONSE_TEXT.conversation_acknowledged} Focus: scope. Focus: scope.`,
+    })],
+    ["conflicting atoms", serializePMRenderEnvelope({
+      schema_version: "agentdash.pm-render-envelope/v1",
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [
+        { kind: "planning_focus", focus: "scope" },
+        { kind: "planning_focus", focus: "risks" },
+      ],
+      rendered_text: `${PM_RESPONSE_TEXT.conversation_acknowledged} Focus: scope. Focus: risks.`,
+    })],
+    ["forged reference", serializePMRenderEnvelope({
+      schema_version: "agentdash.pm-render-envelope/v1",
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [{ kind: "status_reference", status_id: "not-in-request" }],
+      rendered_text: `${PM_RESPONSE_TEXT.conversation_acknowledged} Release status: complete.`,
+    })],
+  ])("rejects %s at the canonical render-envelope boundary", async (_label, text) => {
+    const handoff = vi.fn();
+    const pm = { turn: vi.fn().mockResolvedValue({ ...conversationEnvelope, text }) } as HermesPM;
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm, proposalHandoff: handoff });
+
+    const response = await POST(request(input));
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: { code: "invalid_pm_output", message: "Invalid PM output." } });
+    expect(handoff).not.toHaveBeenCalled();
+  });
+
   // Production break caught: production could imply an executable proposal created a card when no intake controller exists.
   test("fails closed when an executable proposal has no handoff", async () => {
-    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(executableOutput) });
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm: pmReturning(executableEnvelope) });
     const response = await POST(request(input));
 
     expect(response.status).toBe(503);

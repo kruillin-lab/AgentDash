@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -61,11 +61,20 @@ export class CommandTerminationError extends Error {
 }
 
 type SpawnProcess = typeof spawn;
-type TerminateTree = (child: ChildProcess, force: boolean) => Promise<void>;
+type KillProcess = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
+export type ProcessTreeTarget = Readonly<{
+  pid: number | undefined;
+  processGroupId: number | undefined;
+}>;
+type TerminateTree = (target: ProcessTreeTarget, force: boolean) => Promise<void>;
+type ProbeTree = (target: ProcessTreeTarget) => Promise<boolean>;
 
 export type CommandRunnerDependencies = {
   spawnProcess?: SpawnProcess;
   terminateTree?: TerminateTree;
+  probeTree?: ProbeTree;
+  killProcess?: KillProcess;
+  platform?: NodeJS.Platform;
   terminationGraceMs?: number;
   terminationForceMs?: number;
   terminationAttempts?: number;
@@ -139,14 +148,14 @@ function deadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   });
 }
 
-async function terminateWithTaskkill(child: ChildProcess, _force: boolean): Promise<void> {
-  if (!child.pid) throw new CommandTerminationError();
+async function terminateWithTaskkill(target: ProcessTreeTarget, _force: boolean): Promise<void> {
+  if (!target.pid) throw new CommandTerminationError();
   const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
   if (!systemRoot || !isAbsolute(systemRoot)) throw new CommandTerminationError();
   const taskkill = join(systemRoot, "System32", "taskkill.exe");
   // Windows has no reliable process-group SIGTERM equivalent. taskkill /T /F is the
   // reviewed tree boundary for both attempts; the state machine still bounds and retries it.
-  const args = ["/PID", String(child.pid), "/T", "/F"];
+  const args = ["/PID", String(target.pid), "/T", "/F"];
   const env: NodeJS.ProcessEnv = { SystemRoot: systemRoot, WINDIR: systemRoot, NODE_ENV: "production" };
 
   await new Promise<void>((resolveTermination, rejectTermination) => {
@@ -164,23 +173,37 @@ async function terminateWithTaskkill(child: ChildProcess, _force: boolean): Prom
   });
 }
 
-async function terminateProcessTree(child: ChildProcess, force: boolean): Promise<void> {
-  if (process.platform === "win32") {
-    await terminateWithTaskkill(child, force);
-    return;
-  }
-  if (!child.pid) throw new CommandTerminationError();
+async function terminatePosixProcessGroup(target: ProcessTreeTarget, force: boolean, killProcess: KillProcess): Promise<void> {
+  if (!target.processGroupId) throw new CommandTerminationError();
   try {
-    process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+    killProcess(-target.processGroupId, force ? "SIGKILL" : "SIGTERM");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw new CommandTerminationError();
+  }
+}
+
+async function probePosixProcessGroup(target: ProcessTreeTarget, killProcess: KillProcess): Promise<boolean> {
+  if (!target.processGroupId) throw new CommandTerminationError();
+  try {
+    killProcess(-target.processGroupId, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw new CommandTerminationError();
   }
 }
 
 /** Runs one allowlisted executable directly. No shell or inherited environment is available. */
 export function createCommandRunner(dependencies: CommandRunnerDependencies = {}): (options: CommandOptions) => Promise<CommandResult> {
   const spawnProcess = dependencies.spawnProcess ?? spawn;
-  const terminateTree = dependencies.terminateTree ?? terminateProcessTree;
+  const platform = dependencies.platform ?? process.platform;
+  const killProcess = dependencies.killProcess ?? process.kill;
+  const terminateTree = dependencies.terminateTree ?? (platform === "win32"
+    ? terminateWithTaskkill
+    : (target, force) => terminatePosixProcessGroup(target, force, killProcess));
+  const probeTree = dependencies.probeTree ?? ((target: ProcessTreeTarget) => probePosixProcessGroup(target, killProcess));
   const terminationGraceMs = dependencies.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
   const terminationForceMs = dependencies.terminationForceMs ?? DEFAULT_TERMINATION_FORCE_MS;
   const terminationAttempts = dependencies.terminationAttempts ?? DEFAULT_TERMINATION_ATTEMPTS;
@@ -201,12 +224,16 @@ export function createCommandRunner(dependencies: CommandRunnerDependencies = {}
 
     return new Promise<CommandResult>((resolveResult, rejectResult) => {
       const child = spawnProcess(options.executable, [...options.args], {
-        detached: process.platform !== "win32",
+        detached: platform !== "win32",
         env,
         cwd: options.cwd,
         shell: false,
         stdio: [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         windowsHide: true,
+      });
+      const processTreeTarget = Object.freeze({
+        pid: child.pid,
+        processGroupId: platform === "win32" ? undefined : child.pid,
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
@@ -259,7 +286,11 @@ export function createCommandRunner(dependencies: CommandRunnerDependencies = {}
         }
       };
       const waitBeforeTerminationRetry = async (): Promise<void> => {
-        if (closeResult) throw new CommandTerminationError();
+        if (platform === "win32" && closeResult) throw new CommandTerminationError();
+        if (platform !== "win32") {
+          await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, terminationRetryMs));
+          return;
+        }
         await Promise.race([
           new Promise<void>((resolveDelay) => setTimeout(resolveDelay, terminationRetryMs)),
           closed.then(() => { throw new CommandTerminationError(); }),
@@ -267,35 +298,70 @@ export function createCommandRunner(dependencies: CommandRunnerDependencies = {}
       };
       const terminateWithRetries = async (force: boolean): Promise<void> => {
         for (let attempt = 1; attempt <= terminationAttempts; attempt += 1) {
-          if (closeResult) throw new CommandTerminationError();
+          if (platform === "win32" && closeResult) throw new CommandTerminationError();
           try {
-            await terminateTree(child, force);
+            await terminateTree(processTreeTarget, force);
             return;
           } catch {
-            if (attempt === terminationAttempts || closeResult) throw new CommandTerminationError();
+            if (attempt === terminationAttempts || (platform === "win32" && closeResult)) throw new CommandTerminationError();
             await waitBeforeTerminationRetry();
           }
+        }
+      };
+      const waitForTreeExtinction = async (waitMs: number): Promise<boolean> => {
+        const expiresAt = Date.now() + waitMs;
+        while (true) {
+          let alive: boolean;
+          try {
+            alive = await probeTree(processTreeTarget);
+          } catch {
+            throw new CommandTerminationError();
+          }
+          if (!alive) return true;
+          const remaining = expiresAt - Date.now();
+          if (remaining <= 0) return false;
+          await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, Math.min(terminationRetryMs, remaining)));
         }
       };
       const stop = () => {
         if (stopPromise || settled) return;
         stopping = true;
         stopPromise = (async () => {
-          let gracefulConfirmed = true;
-          try {
-            await deadline(terminateWithRetries(false), terminationGraceMs);
-          } catch {
-            gracefulConfirmed = false;
+          if (platform === "win32") {
+            let gracefulConfirmed = true;
+            try {
+              await deadline(terminateWithRetries(false), terminationGraceMs);
+            } catch {
+              gracefulConfirmed = false;
+            }
+
+            if (!gracefulConfirmed) {
+              if (closeResult) throw new CommandTerminationError();
+            } else if (await waitForClose(terminationGraceMs)) {
+              finish(null, closeResult?.signal ?? null);
+              return;
+            }
+
+            await deadline(terminateWithRetries(true), terminationForceMs);
+            if (!await waitForClose(terminationForceMs)) throw new CommandTerminationError();
+            finish(null, closeResult?.signal ?? null);
+            return;
           }
 
-          if (!gracefulConfirmed) {
-            if (closeResult) throw new CommandTerminationError();
-          } else if (await waitForClose(terminationGraceMs)) {
+          let gracefullyExtinct = false;
+          try {
+            await deadline(terminateWithRetries(false), terminationGraceMs);
+            gracefullyExtinct = await waitForTreeExtinction(terminationGraceMs);
+          } catch {
+            gracefullyExtinct = false;
+          }
+          if (gracefullyExtinct && await waitForClose(terminationGraceMs)) {
             finish(null, closeResult?.signal ?? null);
             return;
           }
 
           await deadline(terminateWithRetries(true), terminationForceMs);
+          if (!await waitForTreeExtinction(terminationForceMs)) throw new CommandTerminationError();
           if (!await waitForClose(terminationForceMs)) throw new CommandTerminationError();
           finish(null, closeResult?.signal ?? null);
         })().catch(failTermination);

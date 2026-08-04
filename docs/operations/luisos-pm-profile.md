@@ -25,8 +25,9 @@ proof establishes all of the following for the exact executable and
 - no user rules, plugins, MCP servers, skills, or workspace instructions;
 - no CodeG, controller-command, workspace, browser, tool, or delegation
   credentials in the child environment;
-- a real session reference whose bounded usage report matches the exact
-  qualified model and provider;
+- a real session reference in a trusted launcher's signed execution receipt,
+  bound to the exact qualified executable, profile, model, provider,
+  credential attestation, input, and output;
 - refusal of side-effect requests with zero disposable-target changes; and
 - strict management-proposal output only.
 
@@ -38,8 +39,12 @@ evidence, completed side-effect evidence, exact provider/model, and an opaque
 credential-set attestation. Proof lifetime is at most 900 seconds, and both
 qualification receipts must still be no more than 900 seconds old at each
 turn. AgentDash revalidates the signature and all bindings before every
-launch. Path-and-time-only V1 artifacts and self-issued V2 artifacts are
-rejected.
+request. Only a trusted out-of-process `VerifiedHermesLaunchPort` may then
+authenticate that proof, atomically bind already-open executable/profile
+identities to launch, and sign an execution receipt. The application request
+contains no executable, profile, arguments, environment, working-directory,
+or usage-file path. Path-and-time-only V1 artifacts, self-issued V2 artifacts,
+unsigned receipts, and identity mismatches are rejected.
 
 The production route fails closed. A `create_task` proposal cannot report
 success unless a future intake controller is explicitly injected; this task
@@ -85,32 +90,42 @@ activate, select, or dispatch them.
 
 ## Invocation boundary
 
-Every non-PTY Hermes process is started directly from an absolute executable
-that is also present in the explicit executable allowlist. AgentDash never
-falls back to `hermes` on `PATH`, never runs `.cmd` or `.bat`, never starts a
-shell, and never composes a command string. CEO punctuation remains a literal
-argument in the validated argument array.
+Legacy and qualification non-PTY Hermes processes are started directly from an
+absolute executable that is also present in the explicit executable allowlist.
+AgentDash never falls back to `hermes` on `PATH`, never runs `.cmd` or `.bat`,
+never starts a shell, and never composes a command string. CEO punctuation
+remains a literal argument in the validated argument array. PM turn inference
+does not use this in-process path launcher; it can cross only the trusted atomic
+launch port described above.
 
 Legacy non-PTY status/dashboard operations require `HERMES_BIN` to contain the
 absolute executable and `HERMES_EXECUTABLE_ALLOWLIST` to contain that same path
 (Windows entries are semicolon-separated). Missing or mismatched configuration
 fails closed; it never triggers PATH discovery.
 
-The child environment is reconstructed from the minimum operating-system
-values plus the explicit `HERMES_HOME` and optional inference identifiers. It
-does not spread `process.env`. Output, time, abort, and disposable working
-directory bounds are enforced, and credential-shaped errors are redacted.
+The child environment for legacy and qualification commands is reconstructed
+from the minimum operating-system values plus the explicit `HERMES_HOME` and
+optional inference identifiers. It does not spread `process.env`. Output,
+time, abort, and working-directory bounds are enforced, and credential-shaped
+errors are redacted.
 
-Hermes one-shot output must be strict `{response_code, proposal}` JSON. The
-server maps the finite response code to fixed user-facing text and rejects any
-model-authored text field. AgentDash requires the session id plus exact
-provider/model match from a bounded disposable `--usage-file` JSON report. The
-turn directory is deleted only after the command boundary completes. For a
-stopped turn, completion requires both a successful process-tree termination
-receipt and child close. Windows tree termination uses bounded retry/backoff
-for transient PID-registration races; parent close alone is not treated as
-confirmation. The directory is retained when process-tree termination cannot
-be confirmed.
+Hermes PM model output must be strict
+`{response_code, conversation_atoms, proposal}` JSON. Conversation atoms are a
+finite, bounded union of planning focus, exact status/recall/capability
+references, and clarification fields; arbitrary prose and unknown keys are
+rejected. The server deterministically renders those atoms, wraps them in one
+canonical internal JSON envelope, and the API parses the entire envelope,
+re-renders it byte-for-byte from the exact request facts, strips the machine
+atoms, and returns exactly `{text, session_ref, proposal}`. Prefixes, suffixes,
+duplicate or conflicting atoms, forged references, tag smuggling, and altered
+rendered text fail closed.
+
+For legacy and qualification command stops, completion requires both confirmed
+tree extinction and child close. Windows tree termination uses bounded
+retry/backoff for transient PID-registration races. POSIX captures the
+spawn-time process-group identity, sends TERM, polls the group itself, escalates
+to KILL while the group remains alive, and polls again; direct-child close never
+substitutes for group extinction. An unconfirmed tree fails closed.
 
 ## Opt-in live probe
 
@@ -139,15 +154,10 @@ $env:HERMES_PM_CREDENTIAL_ATTESTATION_SHA256 = "<64-lowercase-hex-attestation>"
 
 With zero inventory, the probe performs disposable requests to write a file,
 run a command, browse, research, and delegate. The probe does not mint its own
-proof. A separate reviewed qualification process must sign a current V2
-artifact, and the live adapter requires all three issuer inputs before it can
-advance:
-
-```powershell
-$env:HERMES_PM_SIGNED_PROOF_PATH = "C:\absolute\path\to\reviewed-proof.json"
-$env:HERMES_PM_TRUSTED_ISSUER_KEY_ID = "<reviewed-key-id>"
-$env:HERMES_PM_TRUSTED_ISSUER_PUBLIC_KEY_PATH = "C:\absolute\path\to\issuer-public-key.pem"
-```
-
-The test itself does not activate production. Missing issuer configuration,
-an invalid signature, stale evidence, or any runtime drift remains NO-GO.
+proof and does not activate production. After qualification, a separate
+reviewed process must sign a current V2 artifact and a separately trusted
+atomic launcher must be configured to authenticate it and issue bound receipts.
+No such production `VerifiedHermesLaunchPort` is configured today, so even a
+future zero-tool probe remains NO-GO until that boundary exists. Missing trust
+configuration, an invalid signature, stale evidence, or any runtime drift also
+remains NO-GO.

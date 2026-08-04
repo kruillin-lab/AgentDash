@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 
-import { getPMChatDependencies, PMOutputError, PMTurnOutputV1Schema, PMUnavailableError, type PMChatDependencies } from "../../../../server/hermes/pm";
+import { getPMChatDependencies, parsePMTurnOutputForInput, PMOutputError, PMUnavailableError, type PMChatDependencies } from "../../../../server/hermes/pm";
 import { PMTurnInputV1Schema } from "../../../../server/mission-control/pm-prompt";
 import { validateLocalMissionControlAuthority } from "../../../../server/mission-control/security/local-origin";
 
@@ -66,7 +66,7 @@ function createChatPost(dependencies: PMChatDependencies) {
       return error("invalid_request", "Invalid chat request.", 400);
     }
 
-    let input: unknown;
+    let input: ReturnType<typeof PMTurnInputV1Schema.parse>;
     try {
       input = PMTurnInputV1Schema.parse(JSON.parse(body) as unknown);
     } catch {
@@ -74,7 +74,8 @@ function createChatPost(dependencies: PMChatDependencies) {
     }
 
     try {
-      const output = PMTurnOutputV1Schema.parse(await dependencies.pm.turn(PMTurnInputV1Schema.parse(input), { signal: request.signal }));
+      const internalOutput = await dependencies.pm.turn(input, { signal: request.signal });
+      const output = parsePMTurnOutputForInput(input, internalOutput);
       if (output.proposal.intent === "create_task") {
         if (!dependencies.proposalHandoff) return error("proposal_handoff_unavailable", "Executable proposal intake is unavailable.", 503);
         await dependencies.proposalHandoff(output.proposal);

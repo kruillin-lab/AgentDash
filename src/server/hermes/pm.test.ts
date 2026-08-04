@@ -1,24 +1,30 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { CommandTerminationError, type CommandOptions, type CommandResult } from "./command";
 import {
   PM_RESPONSE_TEXT,
   PMIsolationProofV2Schema,
   PMOutputError,
   PMUnavailableError,
+  VerifiedHermesExecutionReceiptV1Schema,
   capturePMRuntimeBindings,
   computePMEvidenceDigest,
   createHermesPM,
+  parsePMTurnOutputForInput,
   serializePMIsolationProofSigningPayload,
+  serializeVerifiedHermesReceiptSigningPayload,
   type CreateHermesPMOptions,
   type PMIsolationProofV2,
   type PMProfileEntryV2,
+  type VerifiedHermesExecutionReceiptV1,
+  type VerifiedHermesLaunchPort,
+  type VerifiedHermesLaunchRequestV1,
 } from "./pm";
+import type { PMTurnInputV1 } from "../mission-control/pm-prompt";
 
 const now = new Date("2026-08-04T10:00:00.000Z");
 const inferenceModel = "gpt-5.6-terra";
@@ -32,7 +38,35 @@ const trustedIssuer = {
   keyId: issuerKeyId,
   publicKeyPem: issuerKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
 };
-const turnInput = { message: "Please implement the release checklist.", history: [], reviewed_recall: [], capability_facts: [] };
+const launcherKeyId = "pm-launcher-test-issuer";
+const launcherKeys = generateKeyPairSync("ed25519");
+const trustedLauncher = {
+  keyId: launcherKeyId,
+  publicKeyPem: launcherKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+};
+const turnInput: PMTurnInputV1 = { message: "Please implement the release checklist.", history: [], reviewed_recall: [], capability_facts: [] };
+const statusTurnInput: PMTurnInputV1 = {
+  message: "What is the release status and what should the plan focus on?",
+  history: [],
+  reviewed_recall: [{
+    page_id: "release-policy",
+    page_digest: "f".repeat(64),
+    excerpt: "Production release requires independent verification.",
+    reviewed_at: "2026-08-04T09:59:00.000Z",
+  }],
+  capability_facts: [{
+    capability_id: "route-codex-terra",
+    summary: "Candidate only; dispatch disabled.",
+    available: false,
+    verified_at: "2026-08-04T09:59:00.000Z",
+  }],
+  status_facts: [{
+    status_id: "release",
+    subject: "release",
+    state: "in_progress",
+    verified_at: "2026-08-04T09:59:00.000Z",
+  }],
+};
 const temporaryDirectories: string[] = [];
 
 let root: string;
@@ -52,10 +86,6 @@ function signedProof(proof: PMIsolationProofV2, privateKey = issuerKeys.privateK
   return PMIsolationProofV2Schema.parse({ ...proof, issuer: { ...proof.issuer, signature } });
 }
 
-function commandResult(stdout: string): CommandResult {
-  return { stdout, stderr: "", code: 0, signal: null, timedOut: false, aborted: false, outputLimitExceeded: false };
-}
-
 function proposal(intent: "conversation_only" | "create_task" = "create_task", proposalId = "proposal-1") {
   return {
     schema_version: "agentdash.management-proposal/v1" as const,
@@ -66,20 +96,44 @@ function proposal(intent: "conversation_only" | "create_task" = "create_task", p
   };
 }
 
-function fakeHermes(modelOutput: unknown, usage: Record<string, unknown> = {}) {
-  return vi.fn(async (options: CommandOptions) => {
-    const usageIndex = options.args.indexOf("--usage-file");
-    await writeFile(options.args[usageIndex + 1], JSON.stringify({
-      session_id: "pm-session-1",
-      model: inferenceModel,
-      provider: inferenceProvider,
-      ...usage,
-    }), "utf8");
-    return commandResult(JSON.stringify(modelOutput));
-  });
+function signedReceipt(receipt: VerifiedHermesExecutionReceiptV1): VerifiedHermesExecutionReceiptV1 {
+  const signature = sign(null, Buffer.from(serializeVerifiedHermesReceiptSigningPayload(receipt), "utf8"), launcherKeys.privateKey).toString("base64url");
+  return VerifiedHermesExecutionReceiptV1Schema.parse({ ...receipt, issuer: { ...receipt.issuer, signature } });
 }
 
-function pmOptions(run: CreateHermesPMOptions["run"], overrides: Partial<CreateHermesPMOptions> = {}): CreateHermesPMOptions {
+type FakeLaunchPort = VerifiedHermesLaunchPort & ReturnType<typeof vi.fn>;
+
+function fakeHermes(
+  modelOutput: unknown,
+  inference: Record<string, unknown> = {},
+  mutateReceipt?: (receipt: VerifiedHermesExecutionReceiptV1) => void,
+): FakeLaunchPort {
+  const launch = vi.fn(async (request: VerifiedHermesLaunchRequestV1) => {
+    const proof = PMIsolationProofV2Schema.parse(JSON.parse(request.signed_proof_json) as unknown);
+    const receiptDraft = VerifiedHermesExecutionReceiptV1Schema.parse({
+      schema_version: "agentdash.verified-hermes-execution-receipt/v1",
+      request_id: request.request_id,
+      proof_sha256: request.proof_sha256,
+      invocation_sha256: request.invocation_sha256,
+      turn_input_sha256: request.turn_input_sha256,
+      output_sha256: computePMEvidenceDigest(modelOutput),
+      executable: proof.executable,
+      profile: { home: proof.profile.home, manifest_sha256: proof.profile.manifest_sha256 },
+      inference: { ...proof.inference, ...inference },
+      credentials: proof.credentials,
+      session_ref: "pm-session-1",
+      started_at: request.requested_at,
+      completed_at: request.requested_at,
+      issuer: { key_id: launcherKeyId, algorithm: "ed25519", signature: "A".repeat(86) },
+    });
+    mutateReceipt?.(receiptDraft);
+    const receipt = signedReceipt(VerifiedHermesExecutionReceiptV1Schema.parse(receiptDraft));
+    return { output: modelOutput, receipt };
+  });
+  return Object.assign(launch, { launch }) as FakeLaunchPort;
+}
+
+function pmOptions(launchPort: CreateHermesPMOptions["launchPort"], overrides: Partial<CreateHermesPMOptions> = {}): CreateHermesPMOptions {
   return {
     executable,
     allowedExecutables: [executable],
@@ -91,11 +145,16 @@ function pmOptions(run: CreateHermesPMOptions["run"], overrides: Partial<CreateH
     credentialSetRef,
     credentialAttestationSha256,
     trustedIssuer,
+    launchPort,
+    trustedLauncher,
     environmentSource,
     now: () => now,
-    run,
     ...overrides,
   };
+}
+
+async function clientTurn(pm: ReturnType<typeof createHermesPM>, input: PMTurnInputV1 = turnInput) {
+  return parsePMTurnOutputForInput(input, await pm.turn(input));
 }
 
 async function persistProof(proof: PMIsolationProofV2 = validProof): Promise<void> {
@@ -175,26 +234,151 @@ afterEach(async () => {
 });
 
 describe("HermesPM", () => {
-  test("renders fixed server-owned conversation text from a structured response code", async () => {
-    const run = fakeHermes({ response_code: "clarification_required", proposal: proposal("conversation_only") });
+  // Production break caught: finite codes collapsed planning/status conversation into one
+  // canned acknowledgement instead of rendering bounded facts from the exact turn input.
+  test("renders a substantive proposal-only planning and status response from finite atoms", async () => {
+    const run = fakeHermes({
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [
+        { kind: "planning_focus", focus: "release_readiness" },
+        { kind: "status_reference", status_id: "release" },
+        { kind: "recall_reference", page_id: "release-policy" },
+        { kind: "capability_reference", capability_id: "route-codex-terra" },
+      ],
+      proposal: proposal("conversation_only"),
+    });
     const pm = createHermesPM(pmOptions(run));
 
-    await expect(pm.turn({ ...turnInput, message: "Hello, can we talk about priorities?" })).resolves.toEqual({
-      text: PM_RESPONSE_TEXT.clarification_required,
+    await expect(clientTurn(pm, statusTurnInput)).resolves.toMatchObject({
+      text: "Proposal-only planning view; no lifecycle action: Focus: release readiness. Release status: in progress. Reviewed context release-policy included. Capability route-codex-terra: unavailable.",
+      session_ref: "pm-session-1",
+      proposal: { intent: "conversation_only" },
+    });
+  });
+
+  test("renders fixed server-owned conversation text from a structured response code", async () => {
+    const run = fakeHermes({
+      response_code: "clarification_required",
+      conversation_atoms: [{ kind: "clarification", field: "scope" }],
+      proposal: proposal("conversation_only"),
+    });
+    const pm = createHermesPM(pmOptions(run));
+
+    const input = { ...turnInput, message: "Hello, can we talk about priorities?" };
+    await expect(clientTurn(pm, input)).resolves.toEqual({
+      text: `${PM_RESPONSE_TEXT.clarification_required} What should be included in the project scope?`,
       session_ref: "pm-session-1",
       proposal: proposal("conversation_only"),
     });
   });
 
   test("renders fixed server-owned proposal text with strict create_task data", async () => {
-    const run = fakeHermes({ response_code: "proposal_drafted", proposal: proposal("create_task", "proposal-2") });
+    const run = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task", "proposal-2") });
     const pm = createHermesPM(pmOptions(run));
 
-    await expect(pm.turn(turnInput)).resolves.toMatchObject({
+    await expect(clientTurn(pm)).resolves.toMatchObject({
       text: PM_RESPONSE_TEXT.proposal_drafted,
       session_ref: "pm-session-1",
       proposal: { proposal_id: "proposal-2", intent: "create_task", task_id: null },
     });
+  });
+
+  // Production break caught: the in-process adapter could replace a verified executable or
+  // profile after hashing because it received caller-selected filesystem paths for spawn.
+  test("never enters the path-based run adapter after proof verification", async () => {
+    const launchPort = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") });
+    const pathBasedRun = vi.fn();
+    const pm = createHermesPM({ ...pmOptions(launchPort), run: pathBasedRun } as unknown as CreateHermesPMOptions);
+
+    await pm.turn(turnInput);
+
+    expect(pathBasedRun).not.toHaveBeenCalled();
+    expect(launchPort.launch).toHaveBeenCalledOnce();
+  });
+
+  test("rejects a same-size executable swap reported by the atomic launcher receipt", async () => {
+    const swappedBytes = "fixture-hermes-binary-v2";
+    expect(Buffer.byteLength(swappedBytes)).toBe(Buffer.byteLength("fixture-hermes-binary-v1"));
+    const boundPort = fakeHermes(
+      { response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") },
+      {},
+      (receipt) => { receipt.executable.sha256 = fileDigest(swappedBytes); },
+    );
+    const launchPort: VerifiedHermesLaunchPort = {
+      launch: vi.fn(async (request, options) => {
+        await writeFile(executable, swappedBytes, "utf8");
+        return boundPort.launch(request, options);
+      }),
+    };
+    const pm = createHermesPM(pmOptions(launchPort));
+
+    await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMUnavailableError);
+    expect(launchPort.launch).toHaveBeenCalledOnce();
+  });
+
+  test.each([
+    ["request", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.request_id = "00000000-0000-4000-8000-000000000000"; }],
+    ["proof", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.proof_sha256 = "0".repeat(64); }],
+    ["invocation", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.invocation_sha256 = "0".repeat(64); }],
+    ["turn input", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.turn_input_sha256 = "0".repeat(64); }],
+    ["output", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.output_sha256 = "0".repeat(64); }],
+    ["executable", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.executable.path += ".swapped"; }],
+    ["profile", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.profile.home += ".swapped"; }],
+    ["model", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.inference.model = "different-model"; }],
+    ["provider", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.inference.provider = "different-provider"; }],
+    ["credentials", (receipt: VerifiedHermesExecutionReceiptV1) => { receipt.credentials.credential_set_ref = "different-set"; }],
+  ] as const)("rejects a trusted receipt with mismatched %s identity", async (_label, mutateReceipt) => {
+    const launchPort = fakeHermes(
+      { response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") },
+      {},
+      mutateReceipt,
+    );
+
+    await expect(createHermesPM(pmOptions(launchPort)).turn(turnInput)).rejects.toBeInstanceOf(PMUnavailableError);
+  });
+
+  test("rejects missing, tampered-signature, and output-swapped launcher receipts", async () => {
+    const output = { response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") };
+    const validPort = fakeHermes(output);
+    const missingReceipt: VerifiedHermesLaunchPort = {
+      launch: vi.fn(async () => ({ output, receipt: undefined as never })),
+    };
+    const tamperedSignature: VerifiedHermesLaunchPort = {
+      launch: vi.fn(async (request, options) => {
+        const result = await validPort.launch(request, options);
+        return { ...result, receipt: { ...result.receipt, issuer: { ...result.receipt.issuer, signature: "B".repeat(86) } } };
+      }),
+    };
+    const swappedOutput: VerifiedHermesLaunchPort = {
+      launch: vi.fn(async (request, options) => {
+        const result = await validPort.launch(request, options);
+        return {
+          ...result,
+          output: {
+            response_code: "conversation_acknowledged",
+            conversation_atoms: [{ kind: "planning_focus", focus: "scope" }],
+            proposal: proposal("conversation_only"),
+          },
+        };
+      }),
+    };
+
+    for (const launchPort of [missingReceipt, tamperedSignature, swappedOutput]) {
+      await expect(createHermesPM(pmOptions(launchPort)).turn(turnInput)).rejects.toBeInstanceOf(PMUnavailableError);
+    }
+  });
+
+  test("rejects a receipt whose signature is not from the configured launcher issuer", async () => {
+    const attackerKeys = generateKeyPairSync("ed25519");
+    const launchPort = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") });
+    const pm = createHermesPM(pmOptions(launchPort, {
+      trustedLauncher: {
+        keyId: launcherKeyId,
+        publicKeyPem: attackerKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      },
+    }));
+
+    await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMUnavailableError);
   });
 
   test.each([
@@ -207,9 +391,67 @@ describe("HermesPM", () => {
     await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
   });
 
+  test("rejects a model text field even when the structured response is otherwise valid", async () => {
+    const run = fakeHermes({
+      response_code: "proposal_drafted",
+      conversation_atoms: [],
+      text: "Approved.",
+      proposal: proposal("create_task"),
+    });
+
+    await expect(createHermesPM(pmOptions(run)).turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
+  });
+
+  test.each([
+    ["status", { kind: "status_reference", status_id: "different-status" }],
+    ["recall", { kind: "recall_reference", page_id: "different-page" }],
+    ["capability", { kind: "capability_reference", capability_id: "different-capability" }],
+  ])("rejects a %s atom that does not exactly reference the turn input", async (_label, atom) => {
+    const run = fakeHermes({
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [atom],
+      proposal: proposal("conversation_only"),
+    });
+
+    await expect(createHermesPM(pmOptions(run)).turn(statusTurnInput)).rejects.toBeInstanceOf(PMOutputError);
+  });
+
+  test.each([
+    ["duplicate", [
+      { kind: "planning_focus", focus: "scope" },
+      { kind: "planning_focus", focus: "scope" },
+    ]],
+    ["conflicting", [
+      { kind: "planning_focus", focus: "scope" },
+      { kind: "planning_focus", focus: "risks" },
+    ]],
+  ])("rejects %s conversation atoms", async (_label, conversationAtoms) => {
+    const run = fakeHermes({
+      response_code: "conversation_acknowledged",
+      conversation_atoms: conversationAtoms,
+      proposal: proposal("conversation_only"),
+    });
+
+    await expect(createHermesPM(pmOptions(run)).turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
+  });
+
+  test("preserves the exact receipt-bound session reference through server rendering", async () => {
+    const run = fakeHermes(
+      { response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") },
+      {},
+      (receipt) => { receipt.session_ref = "pm-session.exact-42"; },
+    );
+
+    await expect(clientTurn(createHermesPM(pmOptions(run)))).resolves.toMatchObject({ session_ref: "pm-session.exact-42" });
+  });
+
   test("rejects unknown response codes and code/intent mismatches", async () => {
     const unknown = createHermesPM(pmOptions(fakeHermes({ response_code: "task_authorized", proposal: proposal("create_task") })));
-    const mismatched = createHermesPM(pmOptions(fakeHermes({ response_code: "conversation_acknowledged", proposal: proposal("create_task") })));
+    const mismatched = createHermesPM(pmOptions(fakeHermes({
+      response_code: "conversation_acknowledged",
+      conversation_atoms: [{ kind: "planning_focus", focus: "scope" }],
+      proposal: proposal("create_task"),
+    })));
 
     await expect(unknown.turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
     await expect(mismatched.turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
@@ -220,7 +462,7 @@ describe("HermesPM", () => {
     { approval_grant: { approved: true } },
     { authority: "ceo" },
   ])("rejects forbidden proposal fields instead of stripping them", async (forbiddenField) => {
-    const run = fakeHermes({ response_code: "proposal_drafted", proposal: { ...proposal("create_task"), ...forbiddenField } });
+    const run = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: { ...proposal("create_task"), ...forbiddenField } });
     const pm = createHermesPM(pmOptions(run));
 
     await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
@@ -332,8 +574,9 @@ describe("HermesPM", () => {
     };
 
     await persistProof(proofWithEvidenceObservedAt("2026-08-04T09:45:00.000Z"));
-    const boundaryRun = fakeHermes({ response_code: "proposal_drafted", proposal: proposal("create_task") });
-    await expect(createHermesPM(pmOptions(boundaryRun)).turn(turnInput)).resolves.toMatchObject({
+    const boundaryRun = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") });
+    const boundaryPM = createHermesPM(pmOptions(boundaryRun));
+    await expect(clientTurn(boundaryPM)).resolves.toMatchObject({
       text: PM_RESPONSE_TEXT.proposal_drafted,
     });
 
@@ -343,23 +586,30 @@ describe("HermesPM", () => {
     expect(staleRun).not.toHaveBeenCalled();
   });
 
-  test("launches only the canonical profile and exact environment bound by the signed invocation", async () => {
+  test("sends only the immutable signed proof and invocation identity to the launch port", async () => {
     const profileAlias = join(root, "profile-alias");
     await symlink(profileHome, profileAlias, process.platform === "win32" ? "junction" : "dir");
-    const run = fakeHermes({ response_code: "proposal_drafted", proposal: proposal("create_task") });
+    const run = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") });
     const pm = createHermesPM(pmOptions(run, { profileHome: profileAlias }));
 
-    await expect(pm.turn(turnInput)).resolves.toMatchObject({ text: PM_RESPONSE_TEXT.proposal_drafted });
-    const invocation = run.mock.calls[0][0];
-    expect(invocation.executable).toBe(await realpath(executable));
-    expect(invocation.env).toEqual({
-      SystemRoot: "C:\\Windows",
-      TEMP: join(root, "temp"),
-      TMP: join(root, "tmp"),
-      HERMES_HOME: await realpath(profileHome),
-      HERMES_INFERENCE_MODEL: inferenceModel,
-      HERMES_INFERENCE_PROVIDER: inferenceProvider,
-    });
+    await expect(clientTurn(pm)).resolves.toMatchObject({ text: PM_RESPONSE_TEXT.proposal_drafted });
+    const request = run.mock.calls[0][0] as VerifiedHermesLaunchRequestV1;
+    expect(Object.keys(request).sort()).toEqual([
+      "invocation_sha256",
+      "proof_sha256",
+      "request_id",
+      "requested_at",
+      "schema_version",
+      "signed_proof_json",
+      "turn_input_json",
+      "turn_input_sha256",
+    ]);
+    expect(PMIsolationProofV2Schema.parse(JSON.parse(request.signed_proof_json))).toEqual(validProof);
+    expect(request).not.toHaveProperty("executable");
+    expect(request).not.toHaveProperty("profileHome");
+    expect(request).not.toHaveProperty("args");
+    expect(request).not.toHaveProperty("env");
+    expect(request).not.toHaveProperty("cwd");
   });
 
   test("fails closed before launch when the V2 proof is stale or future-dated", async () => {
@@ -378,43 +628,17 @@ describe("HermesPM", () => {
   test.each([
     ["model", { model: "different-model" }],
     ["provider", { provider: "different-provider" }],
-  ] as const)("rejects usage/session provenance with a mismatched %s", async (_label, usage) => {
-    const run = fakeHermes({ response_code: "proposal_drafted", proposal: proposal("create_task") }, usage);
-    const pm = createHermesPM(pmOptions(run));
-
-    await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMOutputError);
-  });
-
-  test("keeps the disposable working directory until the command boundary resolves", async () => {
-    let commandOptions: CommandOptions | undefined;
-    let release!: () => void;
-    const held = new Promise<void>((resolveHeld) => { release = resolveHeld; });
-    const run = vi.fn(async (options: CommandOptions) => {
-      commandOptions = options;
-      await held;
-      const usageIndex = options.args.indexOf("--usage-file");
-      await writeFile(options.args[usageIndex + 1], JSON.stringify({ session_id: "pm-session-1", model: inferenceModel, provider: inferenceProvider }), "utf8");
-      return commandResult(JSON.stringify({ response_code: "proposal_drafted", proposal: proposal("create_task") }));
-    });
-    const pending = createHermesPM(pmOptions(run)).turn(turnInput);
-    await vi.waitFor(() => expect(commandOptions?.cwd).toBeTruthy());
-
-    await expect(stat(commandOptions!.cwd!)).resolves.toMatchObject({});
-    release();
-    await expect(pending).resolves.toMatchObject({ text: PM_RESPONSE_TEXT.proposal_drafted });
-    await expect(stat(commandOptions!.cwd!)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  test("retains the disposable directory when process-tree termination is unconfirmed", async () => {
-    let commandOptions: CommandOptions | undefined;
-    const run = vi.fn(async (options: CommandOptions): Promise<CommandResult> => {
-      commandOptions = options;
-      throw new CommandTerminationError();
-    });
+  ] as const)("rejects a signed launcher receipt with a mismatched %s identity", async (_label, usage) => {
+    const run = fakeHermes({ response_code: "proposal_drafted", conversation_atoms: [], proposal: proposal("create_task") }, usage);
     const pm = createHermesPM(pmOptions(run));
 
     await expect(pm.turn(turnInput)).rejects.toBeInstanceOf(PMUnavailableError);
-    await expect(stat(commandOptions!.cwd!)).resolves.toMatchObject({});
-    await rm(commandOptions!.cwd!, { force: true, recursive: true });
+  });
+
+  test("maps trusted launcher failures to fixed PM unavailability", async () => {
+    const launchPort = { launch: vi.fn().mockRejectedValue(new Error("launcher detail must not escape")) };
+    const pm = createHermesPM(pmOptions(launchPort));
+
+    await expect(pm.turn(turnInput)).rejects.toEqual(new PMUnavailableError());
   });
 });
