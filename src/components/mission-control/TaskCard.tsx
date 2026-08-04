@@ -1,26 +1,8 @@
 import React from "react";
-import { z } from "zod";
 
-import type { MissionControlBoardV1 } from "../../lib/mission-control/contracts";
+import type { MissionControlCardViewV1 } from "../../lib/mission-control/board-view";
 
-const CardViewSchema = z.object({
-  task_id: z.string().min(1),
-  title: z.string().min(1),
-  detail: z.string().min(1),
-  attempt: z.string().min(1).nullable(),
-}).strict();
-
-export type MissionControlCard = z.infer<typeof CardViewSchema>;
-
-export function cardFromPayload(payload: MissionControlBoardV1["lanes"]["ready"][number]): MissionControlCard | null {
-  try {
-    return CardViewSchema.safeParse(JSON.parse(payload.summary)).data ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function TaskCard({ card, selected, onSelect }: { card: MissionControlCard; selected: boolean; onSelect: () => void }) {
+export function TaskCard({ card, selected, onSelect }: { card: MissionControlCardViewV1; selected: boolean; onSelect: () => void }) {
   return (
     <button
       type="button"

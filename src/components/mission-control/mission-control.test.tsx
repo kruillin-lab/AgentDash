@@ -3,8 +3,11 @@ import React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import type { MissionControlBoardV1 } from "../../lib/mission-control/contracts";
-import { RedactedPayloadV1Schema } from "../../lib/mission-control/contracts";
+import {
+  MissionControlCardPayloadV1Schema,
+  MissionControlServedBoardV1Schema,
+  type MissionControlServedBoardV1,
+} from "../../lib/mission-control/board-view";
 
 let MissionControlShell: (typeof import("./MissionControlShell"))["MissionControlShell"];
 
@@ -17,13 +20,13 @@ beforeAll(async () => {
 afterEach(cleanup);
 
 const digest = "b".repeat(64);
-const card = (task_id: string, title: string, detail: string, attempt: string | null = null) => RedactedPayloadV1Schema.parse({
+const card = (task_id: string, title: string, detail: string, attempt: string | null = null) => MissionControlCardPayloadV1Schema.parse({
   redacted: true as const,
   digest,
-  summary: JSON.stringify({ task_id, title, detail, attempt }),
+  summary: JSON.stringify({ schema_version: "agentdash.mission-control-card-view/v1", task_id, title, detail, attempt }),
 });
 
-const board: MissionControlBoardV1 = {
+const board: MissionControlServedBoardV1 = MissionControlServedBoardV1Schema.parse({
   generated_at: "2026-08-04T10:00:00.000Z",
   unavailable_reason: null,
   archived_count: 0,
@@ -34,7 +37,7 @@ const board: MissionControlBoardV1 = {
     stopped: [card("stopped-task", "Repair bridge", "Hermes bridge is unavailable")],
     completed: [card("completed-task", "Archive report", "Checks passed", "Attempt 3")],
   },
-};
+});
 
 describe("MissionControlShell", () => {
   test("shows the five read-only projections and disabled conversation controls", () => {
@@ -60,12 +63,33 @@ describe("MissionControlShell", () => {
     expect(screen.getByRole("region", { name: "Selected attempt" }).textContent).toContain("Build dashboard");
     expect(screen.getByRole("region", { name: "Selected attempt" }).textContent).toContain("Attempt 2");
     expect(target.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-pressed") === "true")).toHaveLength(1);
+
+    const nextTarget = screen.getByRole("button", { name: /Prepare release/i });
+    await user.click(nextTarget);
+
+    expect(target.getAttribute("aria-pressed")).toBe("false");
+    expect(nextTarget.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getAllByRole("button").filter((button) => button.getAttribute("aria-pressed") === "true")).toHaveLength(1);
+  });
+
+  test("rejects duplicate task identities before two cards can share selection state", () => {
+    const duplicateBoard = {
+      ...board,
+      lanes: {
+        ...board.lanes,
+        ready: [card("same-task", "First card", "First projection")],
+        working: [card("same-task", "Second card", "Second projection")],
+      },
+    };
+
+    expect(() => MissionControlServedBoardV1Schema.parse(duplicateBoard)).toThrow(/unique/i);
   });
 
   test("uses a responsive stacked layout without hiding board information", () => {
     render(<MissionControlShell board={board} />);
 
-    expect(screen.getByTestId("mission-control-layout").className).toContain("xl:grid-cols-[minmax(16rem,0.85fr)_minmax(34rem,2fr)_minmax(18rem,0.9fr)]");
+    expect(screen.getByTestId("mission-control-layout").className).toContain("xl:grid-cols-[minmax(12rem,0.75fr)_minmax(0,1.5fr)_minmax(14rem,0.8fr)]");
   });
 
   test("shows an honest empty state when the production bridge is unavailable", () => {

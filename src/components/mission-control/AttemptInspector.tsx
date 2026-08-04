@@ -1,8 +1,8 @@
 import React from "react";
+import type { MissionControlCardViewV1 } from "../../lib/mission-control/board-view";
 import { Empty, Panel, PanelHeader, StatusPill } from "../ui";
-import type { MissionControlCard } from "./TaskCard";
 
-export function AttemptInspector({ card }: { card: MissionControlCard | null }) {
+export function AttemptInspector({ card }: { card: MissionControlCardViewV1 | null }) {
   return (
     <Panel strong className="min-h-[18rem] p-4" role="region" aria-label="Selected attempt">
       <PanelHeader title="Selected attempt" subtitle="Read-only session inspector" accent="#a78bfa" glyph="⌁" />

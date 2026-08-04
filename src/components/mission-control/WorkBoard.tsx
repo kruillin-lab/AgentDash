@@ -1,7 +1,7 @@
 import React from "react";
-import type { MissionControlBoardV1 } from "../../lib/mission-control/contracts";
+import { parseMissionControlCardPayload, type MissionControlCardViewV1, type MissionControlServedBoardV1, type MissionControlTaskId } from "../../lib/mission-control/board-view";
 import { Panel, PanelHeader } from "../ui";
-import { TaskCard, cardFromPayload, type MissionControlCard } from "./TaskCard";
+import { TaskCard } from "./TaskCard";
 
 const LANE_META = [
   ["ready", "Ready", "#22e3ff"],
@@ -11,7 +11,7 @@ const LANE_META = [
   ["completed", "Completed", "#9dff5b"],
 ] as const;
 
-export function WorkBoard({ board, selectedTaskId, onSelect }: { board: MissionControlBoardV1; selectedTaskId: string | null; onSelect: (card: MissionControlCard) => void }) {
+export function WorkBoard({ board, selectedTaskId, onSelect }: { board: MissionControlServedBoardV1; selectedTaskId: MissionControlTaskId | null; onSelect: (card: MissionControlCardViewV1) => void }) {
   return (
     <section aria-label="Work board" className="min-w-0">
       <div className="mb-3 flex items-center justify-between px-1">
@@ -20,7 +20,7 @@ export function WorkBoard({ board, selectedTaskId, onSelect }: { board: MissionC
       </div>
       <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-5">
         {LANE_META.map(([key, label, accent]) => {
-          const cards = board.lanes[key].map(cardFromPayload).filter((card): card is MissionControlCard => card !== null);
+          const cards = board.lanes[key].map(parseMissionControlCardPayload);
           return (
             <Panel key={key} strong className="min-h-[13rem] p-3" role="region" aria-label={label}>
               <PanelHeader title={label} subtitle={`${cards.length} item${cards.length === 1 ? "" : "s"}`} accent={accent} glyph="◈" />
