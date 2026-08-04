@@ -9,9 +9,11 @@ import {
   CEOCommandV1Schema,
   DigestSchema,
   GetActivationQualificationResultSchema,
+  LookupActivationByCommandResultSchema,
   MandateIdSchema,
   TaskIdSchema,
   approvalGrantFulfillsMandate,
+  canonicalActivationCommandId,
   canonicalActivationQualificationDigest,
   canonicalizeActivationRoutes,
   canonicalDigest,
@@ -42,7 +44,7 @@ type ActivationResultV1 = z.infer<typeof ActivationResultV1Schema>;
 type PendingActivationSnapshot = Extract<ActivationSnapshotV1, { status: "pending" }>;
 type ActiveActivationSnapshot = Extract<ActivationSnapshotV1, { status: "active" }>;
 type ExecutableActivationSnapshot = PendingActivationSnapshot | ActiveActivationSnapshot;
-type AuthorityHermesPort = Pick<HermesPort, "getActivationSnapshot" | "qualifyActivation" | "activateMandate">;
+type AuthorityHermesPort = Pick<HermesPort, "getActivationSnapshot" | "qualifyActivation" | "lookupActivationByCommand" | "activateMandate">;
 
 export type CEOCommandErrorCode =
   | "invalid_request"
@@ -88,7 +90,7 @@ export function replayBindingDigest(
   request: CEOInitialApprovalRequestV1,
   snapshot: ExecutableActivationSnapshot,
   qualificationDigest: string,
-): string {
+): z.infer<typeof DigestSchema> {
   return canonicalDigest({
     schema_version: "agentdash.initial-approval-replay-binding/v1",
     authenticated_session_id: session.session_id,
@@ -224,7 +226,7 @@ function materializeAuthority(
   const expiresAtMs = Math.min(session.expires_at, parsedDeadline(bound.approval_request.expires_at), parsedDeadline(bound.mandate.expiry), parsedDeadline(qualification.valid_until));
   if (!Number.isSafeInteger(consumedAt) || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= consumedAt) fail("activation_expired", "The approval authority has expired.");
   const expiresAt = new Date(expiresAtMs).toISOString();
-  const commandId = `command-${canonicalDigest({ schema_version: "agentdash.ceo-command-id/v1", binding_digest: bindingDigest })}`;
+  const commandId = canonicalActivationCommandId(DigestSchema.parse(bindingDigest));
   const command = CEOCommandV1Schema.parse({
     schema_version: "agentdash.ceo-command/v1",
     command_id: commandId,
@@ -293,6 +295,20 @@ function exactResult(result: ActivationResultV1, command: CEOCommandV1, grant: A
   return ActivationResultV1Schema.parse(result);
 }
 
+function activationResultFor(command: CEOCommandV1, grant: ApprovalGrantV1, mandate: ExecutionMandateV1, qualification: ActivationQualificationV1): ActivationResultV1 {
+  return ActivationResultV1Schema.parse({
+    schema_version: "agentdash.activation-result/v1",
+    task_id: command.task_id,
+    command_id: command.command_id,
+    authority_id: grant.authority_id,
+    task_spec_digest: command.displayed_task_spec_digest,
+    mandate_digest: canonicalDigest(mandate),
+    source_snapshot_digest: command.source_snapshot_digest,
+    qualification_digest: qualification.qualification_digest,
+    activated_at: command.created_at,
+  });
+}
+
 export class CEOCommandService {
   private readonly now: () => Date;
 
@@ -352,17 +368,35 @@ export class CEOCommandService {
     if (!("consumed_at" in nonce)) fail("activation_unavailable", "The replay nonce state is unavailable.");
     validateConsumedAt(nonce.consumed_at, snapshot, qualification);
     const authority = materializeAuthority(session, request, snapshot, qualification, bindingDigest, nonce.consumed_at);
+    const expectedResult = activationResultFor(authority.command, authority.grant, snapshot.mandate, qualification);
+    if (nonce.status === "replayed_same") {
+      let rawLookup: unknown;
+      try {
+        rawLookup = await this.dependencies.hermes.lookupActivationByCommand(authority.command.command_id);
+      } catch {
+        fail("activation_unavailable", "The authoritative activation lookup is unavailable.");
+      }
+      const lookup = LookupActivationByCommandResultSchema.safeParse(rawLookup);
+      if (!lookup.success) fail("activation_unavailable", "The authoritative activation lookup is malformed.");
+      if (lookup.data.status === "found") {
+        return exactResult(lookup.data.result, authority.command, authority.grant, snapshot.mandate, qualification);
+      }
+    }
     const activated = ActivateMandateResultSchema.safeParse(await this.dependencies.hermes.activateMandate({
       expected_snapshot_digest: snapshot.snapshot_digest,
       request_digest: snapshot.request_digest,
       task_id: request.task_id,
+      source_task_spec: snapshot.task_spec,
       task_spec_digest: request.displayed_task_spec_digest,
       mandate_digest: request.proposed_mandate_digest,
       source_approval_request: snapshot.approval_request,
       qualification,
+      replay_binding_digest: bindingDigest,
+      consumed_at: nonce.consumed_at,
       command: authority.command,
       grant: authority.grant,
       mandate: snapshot.mandate,
+      result: expectedResult,
     }));
     if (!activated.success) fail("activation_unavailable", "The activation result is malformed.");
     if (activated.data.status === "conflict") fail("activation_conflict", "The activation or route-registry snapshot changed.");

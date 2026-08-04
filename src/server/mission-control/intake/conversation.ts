@@ -15,6 +15,10 @@ import { PMConversationMessageV1Schema, type PMTurnInputV1 } from "../pm-prompt"
 const claimId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/);
 const generation = z.number().int().positive().safe();
 
+export function canonicalAcknowledgementEvidenceDigest(value: { request_digest: string; ack: IntakeAckV1 }): z.infer<typeof DigestSchema> {
+  return canonicalDigest({ request_digest: value.request_digest, ack: value.ack });
+}
+
 export const AuthorizedIntakeArtifactV1Schema = z.object({
   request_digest: DigestSchema,
   staged_pm_digest: DigestSchema,
@@ -35,7 +39,7 @@ export const CEOConversationClaimResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("conflict") }).strict(),
   z.object({ status: z.literal("pending"), request_digest: DigestSchema, claim_id: claimId, observed_generation: generation, lease_expires_at: TimestampSchema, staged_pm: PMTurnOutputV1Schema.nullable(), staged_pm_digest: DigestSchema.nullable(), authorized_artifact: AuthorizedIntakeArtifactV1Schema.nullable() }).strict(),
 ]).superRefine((value, context) => {
-  if (value.status === "existing" && value.ack_digest !== canonicalDigest(value.ack)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["ack_digest"], message: "existing acknowledgement digest must bind the exact acknowledgement" });
+  if (value.status === "existing" && value.ack_digest !== canonicalAcknowledgementEvidenceDigest(value)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["ack_digest"], message: "existing acknowledgement evidence must bind the exact request digest and acknowledgement" });
   if (value.status !== "pending") return;
   if ((value.staged_pm === null) !== (value.staged_pm_digest === null)) context.addIssue({ code: z.ZodIssueCode.custom, message: "pending staged PM value and digest must appear together" });
   if (value.staged_pm && value.staged_pm_digest !== canonicalDigest(value.staged_pm)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["staged_pm_digest"], message: "pending staged PM digest must be canonical" });
@@ -79,24 +83,28 @@ export type AuthorizeCardResult = z.infer<typeof AuthorizeCardResultSchema>;
 export type CardExistingAckV1 = IntakeAckV1 & { result: Extract<IntakeAckV1["result"], { kind: "card_existing" }> };
 export type ReconcileCommittedCardInput = AuthorizeCardInput & { ack: CardExistingAckV1 };
 export const ReconcileCommittedCardResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("created"), claim_id: claimId, claim_generation: generation, artifact_digest: DigestSchema, authorized_artifact: AuthorizedIntakeArtifactV1Schema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
-  z.object({ status: z.literal("existing"), claim_id: claimId, claim_generation: generation, artifact_digest: DigestSchema, authorized_artifact: AuthorizedIntakeArtifactV1Schema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
+  z.object({ status: z.literal("created"), claim_id: claimId, claim_generation: generation, request_digest: DigestSchema, artifact_digest: DigestSchema, authorized_artifact: AuthorizedIntakeArtifactV1Schema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
+  z.object({ status: z.literal("existing"), claim_id: claimId, claim_generation: generation, request_digest: DigestSchema, artifact_digest: DigestSchema, authorized_artifact: AuthorizedIntakeArtifactV1Schema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
   z.object({ status: z.literal("stale_generation") }).strict(),
   z.object({ status: z.literal("conflict") }).strict(),
 ]).superRefine((value, context) => {
   if ((value.status === "created" || value.status === "existing")
-    && (value.artifact_digest !== value.authorized_artifact.artifact_digest || value.ack_digest !== canonicalDigest(value.ack))) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "reconciled result must bind its exact artifact and acknowledgement" });
+    && (value.request_digest !== value.authorized_artifact.request_digest
+      || value.artifact_digest !== value.authorized_artifact.artifact_digest
+      || value.ack.request_id !== value.authorized_artifact.readiness.task_spec.request_id
+      || value.ack.result.kind !== "card_existing"
+      || value.ack_digest !== canonicalAcknowledgementEvidenceDigest(value))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "reconciled result must bind its exact request, artifact, and acknowledgement" });
   }
 });
 export type ReconcileCommittedCardResult = z.infer<typeof ReconcileCommittedCardResultSchema>;
 export const CompleteTurnResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("created"), claim_id: claimId, claim_generation: generation, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
-  z.object({ status: z.literal("existing"), claim_id: claimId, claim_generation: generation, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
+  z.object({ status: z.literal("created"), claim_id: claimId, claim_generation: generation, request_digest: DigestSchema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
+  z.object({ status: z.literal("existing"), claim_id: claimId, claim_generation: generation, request_digest: DigestSchema, ack: IntakeAckV1Schema, ack_digest: DigestSchema }).strict(),
   z.object({ status: z.literal("stale_generation") }).strict(),
   z.object({ status: z.literal("conflict") }).strict(),
 ]).superRefine((value, context) => {
-  if ((value.status === "created" || value.status === "existing") && value.ack_digest !== canonicalDigest(value.ack)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["ack_digest"], message: "completion digest must bind the exact acknowledgement" });
+  if ((value.status === "created" || value.status === "existing") && value.ack_digest !== canonicalAcknowledgementEvidenceDigest(value)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["ack_digest"], message: "completion evidence must bind the exact request digest and acknowledgement" });
 });
 export type CompleteTurnResult = z.infer<typeof CompleteTurnResultSchema>;
 
@@ -107,7 +115,7 @@ export interface CEOConversationPort {
   stagePMResult(claim_id: string, claim_generation: number, request_digest: string, pm_output: PMTurnOutputV1): Promise<StagePMResult>;
   authorizeCardPersistence(input: AuthorizeCardInput): Promise<AuthorizeCardResult>;
   reconcileCommittedCard(input: ReconcileCommittedCardInput): Promise<ReconcileCommittedCardResult>;
-  completeTurn(claim_id: string, claim_generation: number, ack: IntakeAckV1): Promise<CompleteTurnResult>;
+  completeTurn(claim_id: string, claim_generation: number, request_digest: string, ack: IntakeAckV1): Promise<CompleteTurnResult>;
 }
 
 export class IntakeConversationUnavailableError extends Error {

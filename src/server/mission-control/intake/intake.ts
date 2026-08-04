@@ -44,6 +44,7 @@ import {
   ReconcileCommittedCardResultSchema,
   StagePMResultSchema,
   TakeoverTurnResultSchema,
+  canonicalAcknowledgementEvidenceDigest,
   type AuthorizedIntakeArtifactV1,
   type CardExistingAckV1,
   type CEOConversationPort,
@@ -221,7 +222,7 @@ export class IntakeController {
         fail("intake_unavailable", "A conversation-only result cannot replace an authorized card artifact.");
       }
       const ack = conversationAck(identity.request.request_id, pm);
-      await this.complete(active, ack);
+      await this.complete(active, identity.request_digest, ack);
       return ack;
     }
 
@@ -253,7 +254,7 @@ export class IntakeController {
       }
       if (compiled.status === "clarification_required") {
         const ack = clarificationAck(identity.request.request_id, pm, compiled.reasons);
-        await this.complete(active, ack);
+        await this.complete(active, identity.request_digest, ack);
         return ack;
       }
       if (compiled.status === "intake_unavailable") {
@@ -327,7 +328,7 @@ export class IntakeController {
       persisted.readiness,
       persisted.status === "created" ? "card_created" : "card_existing",
     );
-    await this.complete(active, ack);
+    await this.complete(active, identity.request_digest, ack);
     return ack;
   }
 
@@ -338,6 +339,7 @@ export class IntakeController {
   ): Promise<ActiveClaim | { ack: IntakeAckV1 }> {
     if (claim.status === "existing") {
       if (claim.request_digest !== requestDigest) fail("request_id_conflict", "This request ID is already bound to different content.");
+      if (claim.ack_digest !== canonicalAcknowledgementEvidenceDigest({ request_digest: requestDigest, ack: claim.ack })) fail("intake_unavailable", "The replayed acknowledgement evidence is malformed.");
       return { ack: this.replayedAck(claim.ack, requestId, requestDigest) };
     }
     if (claim.status === "conflict") fail("request_id_conflict", "This request ID is already bound to different content.");
@@ -436,23 +438,25 @@ export class IntakeController {
     if ((repaired.status !== "created" && repaired.status !== "existing")
       || repaired.claim_id !== claim.claim_id
       || repaired.claim_generation !== claim.claim_generation
+      || repaired.request_digest !== requestDigest
       || repaired.artifact_digest !== artifact.artifact_digest
       || canonicalDigest(repaired.authorized_artifact) !== canonicalDigest(artifact)
-      || repaired.ack_digest !== canonicalDigest(ack)
+      || repaired.ack_digest !== canonicalAcknowledgementEvidenceDigest({ request_digest: requestDigest, ack })
       || canonicalDigest(repaired.ack) !== canonicalDigest(ack)) {
       fail("intake_unavailable", "The durable intake card could not be reconciled into the active claim.");
     }
     return IntakeAckV1Schema.parse(repaired.ack);
   }
 
-  private async complete(claim: ActiveClaim, ack: IntakeAckV1): Promise<void> {
-    const completedResult = CompleteTurnResultSchema.safeParse(await this.dependencies.conversation.completeTurn(claim.claim_id, claim.claim_generation, ack));
+  private async complete(claim: ActiveClaim, requestDigest: string, ack: IntakeAckV1): Promise<void> {
+    const completedResult = CompleteTurnResultSchema.safeParse(await this.dependencies.conversation.completeTurn(claim.claim_id, claim.claim_generation, requestDigest, ack));
     if (!completedResult.success) fail("intake_unavailable", "The completion result is malformed.");
     const completed = completedResult.data;
     if ((completed.status === "created" || completed.status === "existing")
       && completed.claim_id === claim.claim_id
       && completed.claim_generation === claim.claim_generation
-      && completed.ack_digest === canonicalDigest(ack)
+      && completed.request_digest === requestDigest
+      && completed.ack_digest === canonicalAcknowledgementEvidenceDigest({ request_digest: requestDigest, ack })
       && canonicalDigest(completed.ack) === canonicalDigest(ack)) return;
     fail("intake_unavailable", "The intake outcome could not be committed.");
   }

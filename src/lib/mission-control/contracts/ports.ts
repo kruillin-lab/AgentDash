@@ -175,7 +175,25 @@ export const GetActivationQualificationResultSchema = z.discriminatedUnion("stat
 export type GetActivationQualificationResult = z.infer<typeof GetActivationQualificationResultSchema>;
 
 export const ActivationResultV1Schema = z.object({ schema_version: z.literal("agentdash.activation-result/v1"), task_id: TaskIdSchema, command_id: CommandIdSchema, authority_id: AuthorityIdSchema, task_spec_digest: DigestSchema, mandate_digest: DigestSchema, source_snapshot_digest: DigestSchema, qualification_digest: DigestSchema, activated_at: TimestampSchema }).strict();
-export const ActivateMandateInputSchema = z.object({ expected_snapshot_digest: DigestSchema, request_digest: DigestSchema, task_id: TaskIdSchema, task_spec_digest: DigestSchema, mandate_digest: DigestSchema, source_approval_request: CEOInputRequestV1Schema, qualification: ActivationQualificationV1Schema, command: CEOCommandV1Schema, grant: ApprovalGrantV1Schema, mandate: ExecutionMandateV1Schema }).strict().superRefine((value, context) => {
+export function canonicalActivationCommandId(replayBindingDigest: z.infer<typeof DigestSchema>): z.infer<typeof CommandIdSchema> {
+  return CommandIdSchema.parse(`command-${canonicalDigest({ schema_version: "agentdash.ceo-command-id/v1", binding_digest: replayBindingDigest })}`);
+}
+export const ActivateMandateInputSchema = z.object({
+  expected_snapshot_digest: DigestSchema,
+  request_digest: DigestSchema,
+  task_id: TaskIdSchema,
+  source_task_spec: TaskSpecV1Schema,
+  task_spec_digest: DigestSchema,
+  mandate_digest: DigestSchema,
+  source_approval_request: CEOInputRequestV1Schema,
+  qualification: ActivationQualificationV1Schema,
+  replay_binding_digest: DigestSchema,
+  consumed_at: z.number().int().nonnegative().safe(),
+  command: CEOCommandV1Schema,
+  grant: ApprovalGrantV1Schema,
+  mandate: ExecutionMandateV1Schema,
+  result: ActivationResultV1Schema,
+}).strict().superRefine((value, context) => {
   const request = value.source_approval_request;
   const qualification = value.qualification;
   const command = value.command;
@@ -186,6 +204,8 @@ export const ActivateMandateInputSchema = z.object({ expected_snapshot_digest: D
   if (mandate.verification_step.route_id !== null) referencedRouteIds.add(mandate.verification_step.route_id);
   const evidenceByRoute = new Map(qualification.routes.map((route) => [route.route_id, route]));
   const taskAndMandateBound = value.task_id === mandate.task_id
+    && value.source_task_spec.request_id === mandate.request_id
+    && canonicalDigest(value.source_task_spec) === value.task_spec_digest
     && value.task_spec_digest === mandate.task_spec_revision.task_spec_digest
     && value.mandate_digest === canonicalDigest(mandate)
     && value.request_digest === qualification.request_digest
@@ -210,6 +230,7 @@ export const ActivateMandateInputSchema = z.object({ expected_snapshot_digest: D
     && canonicalDigest(request.proposed_side_effects) === canonicalDigest(mandate.capability_scope.allowed_side_effects)
     && Date.parse(request.expires_at) <= Date.parse(mandate.expiry);
   const commandBound = command.command_type === "approve"
+    && command.command_id === canonicalActivationCommandId(value.replay_binding_digest)
     && command.requested_decision === "initial_mandate_approval"
     && command.task_id === value.task_id
     && command.displayed_task_spec_revision === mandate.task_spec_revision.plan_revision
@@ -226,6 +247,19 @@ export const ActivateMandateInputSchema = z.object({ expected_snapshot_digest: D
     && grant.source_snapshot_digest === value.expected_snapshot_digest
     && grant.qualification_digest === qualification.qualification_digest
     && approvalGrantFulfillsMandate(mandate, grant);
+  const materializationDate = new Date(value.consumed_at);
+  const materializationTimestamp = Number.isFinite(materializationDate.getTime()) ? materializationDate.toISOString() : null;
+  const resultBound = value.result.task_id === value.task_id
+    && value.result.command_id === command.command_id
+    && value.result.authority_id === grant.authority_id
+    && value.result.task_spec_digest === value.task_spec_digest
+    && value.result.mandate_digest === value.mandate_digest
+    && value.result.source_snapshot_digest === value.expected_snapshot_digest
+    && value.result.qualification_digest === qualification.qualification_digest
+    && value.result.activated_at === command.created_at
+    && materializationTimestamp !== null
+    && command.created_at === materializationTimestamp
+    && grant.approved_at === materializationTimestamp;
   const deadlinesBound = Date.parse(command.expires_at) <= Date.parse(request.expires_at)
     && Date.parse(command.expires_at) <= Date.parse(mandate.expiry)
     && Date.parse(command.expires_at) <= Date.parse(qualification.valid_until)
@@ -241,7 +275,7 @@ export const ActivateMandateInputSchema = z.object({ expected_snapshot_digest: D
       && Date.parse(route.expires_at) >= Date.parse(grant.expires_at))
     && mandate.action_nodes.every((node) => node.route_id === null || (evidenceByRoute.get(node.route_id)?.route_proof_id === node.route_proof_id && evidenceByRoute.get(node.route_id)?.evidence_digest === node.route_proof_digest))
     && (mandate.verification_step.route_id === null || (evidenceByRoute.get(mandate.verification_step.route_id)?.route_proof_id === mandate.verification_step.route_proof_id && evidenceByRoute.get(mandate.verification_step.route_id)?.evidence_digest === mandate.verification_step.route_proof_digest));
-  if (!taskAndMandateBound || !sourceRequestBound || !commandBound || !grantBound || !deadlinesBound || !routesBound) context.addIssue({ code: z.ZodIssueCode.custom, message: "activation envelope must bind one exact qualified approval authority tuple" });
+  if (!taskAndMandateBound || !sourceRequestBound || !commandBound || !grantBound || !resultBound || !deadlinesBound || !routesBound) context.addIssue({ code: z.ZodIssueCode.custom, message: "activation envelope must bind one exact qualified approval authority tuple" });
 });
 export type ActivateMandateInput = z.infer<typeof ActivateMandateInputSchema>;
 export const ActivateMandateResultSchema = z.discriminatedUnion("status", [ActivationResultV1Schema.extend({ status: z.literal("activated") }).strict(), ActivationResultV1Schema.extend({ status: z.literal("existing") }).strict(), z.object({ status: z.literal("conflict") }).strict()]);
@@ -265,7 +299,7 @@ export const ActivationSnapshotV1Schema = z.discriminatedUnion("status", [
     }
     return;
   }
-  const envelope = ActivateMandateInputSchema.safeParse({ expected_snapshot_digest: value.source_snapshot_digest, request_digest: value.request_digest, task_id: value.mandate.task_id, task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest, source_approval_request: value.source_approval_request, qualification: value.qualification, command: value.command, grant: value.grant, mandate: value.mandate });
+  const envelope = ActivateMandateInputSchema.safeParse({ expected_snapshot_digest: value.source_snapshot_digest, request_digest: value.request_digest, task_id: value.mandate.task_id, source_task_spec: value.task_spec, task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest, source_approval_request: value.source_approval_request, qualification: value.qualification, replay_binding_digest: value.replay_binding_digest, consumed_at: value.consumed_at, command: value.command, grant: value.grant, mandate: value.mandate, result: value.result });
   const consumedAt = value.consumed_at;
   const resultBound = value.result.task_id === value.mandate.task_id
     && value.result.command_id === value.command.command_id

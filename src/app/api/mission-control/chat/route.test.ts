@@ -14,6 +14,7 @@ import {
 } from "../../../../server/hermes/pm";
 import { getIntakeControllerDependencies } from "../../../../server/mission-control/intake/dependencies";
 import { canonicalizeCEOIntakeRequest } from "../../../../server/mission-control/intake/compiler";
+import { canonicalAcknowledgementEvidenceDigest } from "../../../../server/mission-control/intake/conversation";
 import type { IntakeControllerDependencies } from "../../../../server/mission-control/intake/intake";
 import { POST } from "./route";
 
@@ -57,14 +58,14 @@ function dependencies(output: PMTurnEnvelopeV1, compile = vi.fn().mockReturnValu
     pm: { turn: vi.fn().mockResolvedValue(output) } as HermesPM,
     conversation: {
       claimTurn: vi.fn(async () => ack
-        ? { status: "existing" as const, request_digest: requestDigest, ack, ack_digest: canonicalDigest(ack) }
+        ? { status: "existing" as const, request_digest: requestDigest, ack, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: requestDigest, ack }) }
         : { status: "claimed" as const, request_digest: requestDigest, claim_id: "claim-1", claim_generation: 1, lease_expires_at: "2026-08-04T10:01:00.000Z", mode: "initial_inference" as const }),
       committedHistory: vi.fn().mockResolvedValue([]),
       takeoverTurn: vi.fn(),
-      stagePMResult: vi.fn(async (claim_id, claim_generation, request_digest, pm) => ({ status: "staged" as const, claim_id, claim_generation, request_digest, staged_pm_digest: (await import("../../../../lib/mission-control/contracts")).canonicalDigest(pm) })),
+      stagePMResult: vi.fn(async (claim_id, claim_generation, request_digest, pm) => ({ status: "staged" as const, claim_id, claim_generation, request_digest, staged_pm_digest: canonicalDigest(pm) })),
       authorizeCardPersistence: vi.fn(),
       reconcileCommittedCard: vi.fn(),
-      completeTurn: vi.fn(async (claim_id, claim_generation, value) => { ack = value; return { status: "created" as const, claim_id, claim_generation, ack: value, ack_digest: canonicalDigest(value) }; }),
+      completeTurn: vi.fn(async (claim_id, claim_generation, request_digest, value) => { ack = value; return { status: "created" as const, claim_id, claim_generation, request_digest, ack: value, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest, ack: value }) }; }),
     },
     context: { load: vi.fn().mockResolvedValue({ pm_context: { history: [], reviewed_recall: [], capability_facts: [], status_facts: [] }, compilation_policy: {}, compilation_policy_digest: "a".repeat(64), activation: { kind: "approval_required" } }) } as unknown as IntakeControllerDependencies["context"],
     hermes: { lookupIntake: vi.fn().mockResolvedValue({ status: "not_found" }), persistIntake: vi.fn() } as unknown as IntakeControllerDependencies["hermes"],

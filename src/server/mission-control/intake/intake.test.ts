@@ -4,7 +4,7 @@ import { ActionOutcomeValues, CompilationPolicySnapshotV1Schema, DigestSchema, P
 import { IntakeAckV1Schema, type IntakeAckV1 } from "../../../lib/mission-control/intake-api";
 import { PM_RESPONSE_TEXT, serializePMRenderEnvelope, type HermesPM, type PMTurnOutputV1 } from "../../hermes/pm";
 import type { ServerIntakeContextPort } from "./context";
-import type { AuthorizedIntakeArtifactV1, AuthorizeCardInput, CEOConversationPort, ReconcileCommittedCardInput } from "./conversation";
+import { canonicalAcknowledgementEvidenceDigest, type AuthorizedIntakeArtifactV1, type AuthorizeCardInput, type CEOConversationPort, type ReconcileCommittedCardInput } from "./conversation";
 import { IntakeController } from "./intake";
 import { canonicalIntakeArtifactDigestFromReadiness, canonicalizeCEOIntakeRequest, compileIntake, type CompileIntakeInput, type CompileIntakeResult } from "./compiler";
 
@@ -107,7 +107,7 @@ class ConversationFake implements CEOConversationPort {
       return { status: "claimed" as const, request_digest: claim.request_digest, claim_id: claim.claim_id, claim_generation: 1, lease_expires_at: claim.lease_expires_at, mode: "initial_inference" as const };
     }
     if (current.request_digest !== input.request_digest) return { status: "conflict" as const };
-    if (current.ack) return { status: "existing" as const, request_digest: current.request_digest, ack: current.ack, ack_digest: canonicalDigest(current.ack) };
+    if (current.ack) return { status: "existing" as const, request_digest: current.request_digest, ack: current.ack, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: current.request_digest, ack: current.ack }) };
     return { status: "pending" as const, request_digest: current.request_digest, claim_id: current.claim_id, observed_generation: current.generation, lease_expires_at: current.lease_expires_at, staged_pm: current.staged, staged_pm_digest: current.staged ? canonicalDigest(current.staged) : null, authorized_artifact: current.authorized_artifact };
   }
 
@@ -186,7 +186,7 @@ class ConversationFake implements CEOConversationPort {
         && canonicalDigest(claim.ack) === canonicalDigest(input.ack);
       this.repairStatuses.push(exactExisting ? "existing" : "conflict");
       return exactExisting
-        ? { status: "existing" as const, claim_id: input.claim_id, claim_generation: input.claim_generation, artifact_digest: claim.artifact_digest!, authorized_artifact: structuredClone(claim.authorized_artifact!), ack: structuredClone(claim.ack), ack_digest: canonicalDigest(claim.ack) }
+        ? { status: "existing" as const, claim_id: input.claim_id, claim_generation: input.claim_generation, request_digest: claim.request_digest, artifact_digest: claim.artifact_digest!, authorized_artifact: structuredClone(claim.authorized_artifact!), ack: structuredClone(claim.ack), ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: claim.request_digest, ack: claim.ack }) }
         : { status: "conflict" as const };
     }
     claim.staged ??= structuredClone(input.artifact.readiness.pm);
@@ -195,7 +195,7 @@ class ConversationFake implements CEOConversationPort {
     claim.card_committed = true;
     claim.ack = structuredClone(input.ack);
     this.repairStatuses.push("created");
-    return { status: "created" as const, claim_id: input.claim_id, claim_generation: input.claim_generation, artifact_digest: claim.artifact_digest, authorized_artifact: structuredClone(claim.authorized_artifact), ack: structuredClone(claim.ack), ack_digest: canonicalDigest(claim.ack) };
+    return { status: "created" as const, claim_id: input.claim_id, claim_generation: input.claim_generation, request_digest: claim.request_digest, artifact_digest: claim.artifact_digest, authorized_artifact: structuredClone(claim.authorized_artifact), ack: structuredClone(claim.ack), ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: claim.request_digest, ack: claim.ack }) };
   }
 
   markCardCommitted(claim_id: string, claim_generation: number) {
@@ -204,17 +204,18 @@ class ConversationFake implements CEOConversationPort {
     claim.card_committed = true;
   }
 
-  async completeTurn(claim_id: string, claim_generation: number, ack: IntakeAckV1) {
+  async completeTurn(claim_id: string, claim_generation: number, request_digest: string, ack: IntakeAckV1) {
     this.completeCalls += 1;
     const claim = [...this.claims.values()].find((candidate) => candidate.claim_id === claim_id);
     if (!claim || claim.generation !== claim_generation) return { status: "stale_generation" as const };
-    if (claim.ack) return canonicalDigest(claim.ack) === canonicalDigest(ack) ? { status: "existing" as const, claim_id, claim_generation, ack: claim.ack, ack_digest: canonicalDigest(claim.ack) } : { status: "conflict" as const };
+    if (claim.request_digest !== request_digest) return { status: "conflict" as const };
+    if (claim.ack) return canonicalDigest(claim.ack) === canonicalDigest(ack) ? { status: "existing" as const, claim_id, claim_generation, request_digest: claim.request_digest, ack: claim.ack, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: claim.request_digest, ack: claim.ack }) } : { status: "conflict" as const };
     const card = ack.result.kind === "card_created" || ack.result.kind === "card_existing";
     if (card && !claim.card_committed) return { status: "conflict" as const };
     if (!card && claim.artifact_digest) return { status: "conflict" as const };
     if (this.completeFailureOnce) { this.completeFailureOnce = false; return { status: "conflict" as const }; }
     claim.ack = structuredClone(ack);
-    return { status: "created" as const, claim_id, claim_generation, ack: claim.ack, ack_digest: canonicalDigest(claim.ack) };
+    return { status: "created" as const, claim_id, claim_generation, request_digest: claim.request_digest, ack: claim.ack, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: claim.request_digest, ack: claim.ack }) };
   }
 }
 
@@ -316,6 +317,28 @@ describe("IntakeController", () => {
     expect(pm.turn).not.toHaveBeenCalled();
     expect(hermes.persistCalls).toBe(0);
     expect(conversation.repairCalls).toBe(1);
+  });
+
+  test("rejects acknowledgement-only evidence returned by durable card reconciliation", async () => {
+    const conversation = new ConversationFake();
+    const pmOutput = output("create_task").parsed as PMTurnOutputV1;
+    const compiled = fakeCompiler({ request, pm_output: pmOutput } as CompileIntakeInput);
+    if (compiled.status !== "compiled") throw new Error("expected compiled fixture");
+    const originalRepair = conversation.reconcileCommittedCard.bind(conversation);
+    (conversation as any).reconcileCommittedCard = vi.fn(async (input: ReconcileCommittedCardInput) => {
+      const result = await originalRepair(input);
+      return result.status === "created" || result.status === "existing"
+        ? { ...result, ack_digest: canonicalDigest(result.ack) }
+        : result;
+    });
+    const pm = { turn: vi.fn() } as unknown as HermesPM;
+    const { intake, hermes } = controller(conversation, pm);
+    hermes.cards.set(request.request_id, { request_digest: compiled.request_digest, task_id: compiled.task_id, artifact_digest: compiled.artifact_digest, readiness: compiled.readiness });
+
+    await expect(intake.handle(request)).rejects.toMatchObject({ code: "intake_unavailable" });
+    expect(pm.turn).not.toHaveBeenCalled();
+    expect(conversation.completeCalls).toBe(0);
+    expect(hermes.persistCalls).toBe(0);
   });
 
   test("rejects a durable-card digest mismatch on a newly claimed turn before PM inference", async () => {
@@ -794,7 +817,27 @@ describe("IntakeController", () => {
     ["claim generation", (claimId: string, claimGeneration: number) => ({ claim_id: claimId, claim_generation: claimGeneration + 1 })],
   ])("rejects completion CAS evidence with mismatched %s", async (_name, resultBinding) => {
     const conversation = new ConversationFake();
-    (conversation as any).completeTurn = vi.fn(async (claimId: string, claimGeneration: number, ack: IntakeAckV1) => ({ status: "created", ...resultBinding(claimId, claimGeneration), ack, ack_digest: canonicalDigest(ack) }));
+    (conversation as any).completeTurn = vi.fn(async (claimId: string, claimGeneration: number, requestDigest: string, ack: IntakeAckV1) => ({ status: "created", ...resultBinding(claimId, claimGeneration), request_digest: requestDigest, ack, ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: requestDigest, ack }) }));
+    const pm = { turn: vi.fn().mockResolvedValue(output("conversation_only").envelope) } as HermesPM;
+    const { intake, hermes } = controller(conversation, pm);
+
+    await expect(intake.handle(request)).rejects.toMatchObject({ code: "intake_unavailable" });
+    expect(conversation.claims.get(request.request_id)?.ack).toBeNull();
+    expect(hermes.persistCalls).toBe(0);
+    expect(hermes.cards.size).toBe(0);
+  });
+
+  test("rejects completion evidence whose valid acknowledgement pair names a foreign request digest", async () => {
+    const conversation = new ConversationFake();
+    const foreignRequestDigest = DigestSchema.parse("b".repeat(64));
+    (conversation as any).completeTurn = vi.fn(async (claimId: string, claimGeneration: number, _requestDigest: string, ack: IntakeAckV1) => ({
+      status: "created",
+      claim_id: claimId,
+      claim_generation: claimGeneration,
+      request_digest: foreignRequestDigest,
+      ack,
+      ack_digest: canonicalAcknowledgementEvidenceDigest({ request_digest: foreignRequestDigest, ack }),
+    }));
     const pm = { turn: vi.fn().mockResolvedValue(output("conversation_only").envelope) } as HermesPM;
     const { intake, hermes } = controller(conversation, pm);
 
@@ -820,6 +863,26 @@ describe("IntakeController", () => {
     expect(pm.turn).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ["conversation-only", () => IntakeAckV1Schema.parse({ schema_version: "agentdash.intake-ack/v1", request_id: request.request_id, pm: output("conversation_only", "foreign").parsed, result: { kind: "conversation_only" }, board_refresh: false, select_task_id: null })],
+    ["clarification", () => IntakeAckV1Schema.parse({ schema_version: "agentdash.intake-ack/v1", request_id: request.request_id, pm: output("create_task", "foreign").parsed, result: { kind: "clarification_required", reasons: [{ code: "missing_scope", message: "Scope is required." }] }, board_refresh: false, select_task_id: null })],
+  ] as const)("rejects a foreign same-ID %s acknowledgement with acknowledgement-only evidence before downstream work", async (_name, foreignAck) => {
+    const conversation = new ConversationFake();
+    const identity = canonicalizeCEOIntakeRequest(request);
+    (conversation as any).claimTurn = vi.fn(async () => {
+      const ack = foreignAck();
+      return { status: "existing", request_digest: identity.request_digest, ack, ack_digest: canonicalDigest(ack) };
+    });
+    const pm = { turn: vi.fn().mockResolvedValue(output("conversation_only").envelope) } as HermesPM;
+    const { intake, hermes } = controller(conversation, pm);
+
+    await expect(intake.handle(request)).rejects.toMatchObject({ code: "intake_unavailable" });
+    expect(pm.turn).not.toHaveBeenCalled();
+    expect(conversation.completeCalls).toBe(0);
+    expect(hermes.persistCalls).toBe(0);
+    expect(hermes.cards.size).toBe(0);
+  });
+
   test("rejects stale generations from staging, authorization, and completion", async () => {
     const conversation = new ConversationFake();
     const identity = canonicalizeCEOIntakeRequest(request);
@@ -831,6 +894,6 @@ describe("IntakeController", () => {
 
     await expect(conversation.stagePMResult(claim.claim_id, 1, identity.request_digest, staged)).resolves.toMatchObject({ status: "stale_generation" });
     await expect(conversation.authorizeCardPersistence({ claim_id: claim.claim_id, claim_generation: 1, artifact: {} as never })).resolves.toMatchObject({ status: "stale_generation" });
-    await expect(conversation.completeTurn(claim.claim_id, 1, {} as IntakeAckV1)).resolves.toMatchObject({ status: "stale_generation" });
+    await expect(conversation.completeTurn(claim.claim_id, 1, identity.request_digest, {} as IntakeAckV1)).resolves.toMatchObject({ status: "stale_generation" });
   });
 });

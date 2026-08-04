@@ -4,7 +4,7 @@ import { ActionOutcomeValues, ActivateMandateInputSchema, ActivationSnapshotV1Sc
 import { compileIntake, type CompileIntakeInput } from "../intake/compiler";
 import type { CommandSessionV1 } from "../security/command-session";
 import type { NonceConsumption, NonceReplayLookup, NonceStore } from "../security/nonce-store";
-import { CEOCommandService, CEOInitialApprovalRequestV1Schema, replayBindingDigest, type CEOInitialApprovalRequestV1 } from "./ceo-command";
+import { CEOCommandService, CEOInitialApprovalRequestV1Schema, type CEOInitialApprovalRequestV1 } from "./ceo-command";
 
 const now = "2026-08-04T10:00:00.000Z";
 const nowMs = Date.parse(now);
@@ -155,8 +155,10 @@ class MemoryNonces implements NonceStore {
 
 class HermesFake {
   snapshot: ActivationSnapshotV1;
+  committedSnapshot: Extract<ActivationSnapshotV1, { status: "active" }> | null = null;
   activation: ActivateMandateInput | null = null;
   activationCalls = 0;
+  activationLookupCalls = 0;
   qualificationCalls = 0;
   activationFailure = false;
   loseResponseAfterWrite = false;
@@ -166,6 +168,7 @@ class HermesFake {
   qualificationStatus: "qualified" | "conflict" | "unavailable" = "qualified";
   beforeActivation: (() => void) | null = null;
   activationResponseOverride: ((input: ActivateMandateInput) => unknown) | null = null;
+  activationLookupResponseOverride: ((commandId: string) => unknown | Promise<unknown>) | null = null;
   commitNow = nowMs;
   result: ReturnType<typeof this.activationResult> | null = null;
   constructor(snapshot: ActivationSnapshotV1) {
@@ -180,7 +183,11 @@ class HermesFake {
     if (this.qualificationStatus === "unavailable") return { status: "unavailable" as const, reason: "registry unavailable" };
     return { status: "qualified" as const, route_registry_revision: this.routeRegistryRevision, routes: structuredClone(this.currentRoutes) };
   }
-  async lookupActivationByCommand(command_id: string) { return this.result?.command_id === command_id ? { status: "found" as const, result: this.result } : { status: "not_found" as const }; }
+  async lookupActivationByCommand(command_id: string) {
+    this.activationLookupCalls += 1;
+    if (this.activationLookupResponseOverride) return await this.activationLookupResponseOverride(command_id) as any;
+    return this.result?.command_id === command_id ? { status: "found" as const, result: this.result } : { status: "not_found" as const };
+  }
   async activateMandate(input: ActivateMandateInput) {
     this.activationCalls += 1;
     if (this.activationFailure) throw new Error("simulated response loss");
@@ -210,7 +217,8 @@ class HermesFake {
     if (conflict) return { status: "conflict" as const };
     this.activationWrites += 1;
     this.activation = structuredClone(input);
-    this.result = this.activationResult(input);
+    this.result = structuredClone(input.result);
+    this.committedSnapshot = activeSnapshotFromActivation(input);
     if (this.loseResponseAfterWrite) {
       this.loseResponseAfterWrite = false;
       throw new Error("simulated response loss after durable write");
@@ -223,27 +231,24 @@ function commandService(hermes: HermesFake, nonces: MemoryNonces, at = now) {
   return new CEOCommandService({ hermes, nonces, now: () => new Date(at) });
 }
 
-function activeSnapshot(
-  pending: Extract<ActivationSnapshotV1, { status: "pending" }>,
-  request: CEOInitialApprovalRequestV1,
-  activation: ActivateMandateInput,
-  result: ReturnType<HermesFake["activationResult"]>,
-): ActivationSnapshotV1 {
-  return ActivationSnapshotV1Schema.parse({
+function activeSnapshotFromActivation(activation: ActivateMandateInput): Extract<ActivationSnapshotV1, { status: "active" }> {
+  const snapshot = ActivationSnapshotV1Schema.parse({
     status: "active",
-    snapshot_digest: canonicalDigest({ active: result }),
-    source_snapshot_digest: pending.snapshot_digest,
-    request_digest: pending.request_digest,
-    task_spec: pending.task_spec,
-    mandate: pending.mandate,
-    source_approval_request: pending.approval_request,
+    snapshot_digest: canonicalDigest({ active: activation.result }),
+    source_snapshot_digest: activation.expected_snapshot_digest,
+    request_digest: activation.request_digest,
+    task_spec: activation.source_task_spec,
+    mandate: activation.mandate,
+    source_approval_request: activation.source_approval_request,
     qualification: activation.qualification,
-    replay_binding_digest: replayBindingDigest(session, request, pending, activation.qualification.qualification_digest),
-    consumed_at: nowMs,
+    replay_binding_digest: activation.replay_binding_digest,
+    consumed_at: activation.consumed_at,
     command: activation.command,
     grant: activation.grant,
-    result,
+    result: activation.result,
   });
+  if (snapshot.status !== "active") throw new Error("active activation fixture failed");
+  return snapshot;
 }
 
 describe("CEO command service", () => {
@@ -263,6 +268,19 @@ describe("CEO command service", () => {
     expect(hermes.activation?.command).toMatchObject({ replay_nonce: request.replay_nonce, csrf_valid: true, origin_valid: true, created_at: now });
     expect(hermes.activation?.grant).toMatchObject({ authority_id: snapshot.mandate.authority_source.authority_id, source_command_id: result.command_id, approved_at: now });
     expect(snapshot.mandate.authority_source).toMatchObject({ kind: "approval_precommit", binding: "precommitted_at_intake" });
+  });
+
+  test("passes every byte required to persist an exact active replay through the atomic activation input", async () => {
+    const { snapshot, request } = fixture();
+    const hermes = new HermesFake(snapshot);
+    const nonces = new MemoryNonces();
+
+    const first = await commandService(hermes, nonces).approveInitial(request, session);
+    const durableSnapshot = ActivationSnapshotV1Schema.parse(structuredClone(hermes.committedSnapshot));
+    hermes.snapshot = durableSnapshot;
+
+    await expect(commandService(hermes, nonces).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(first);
+    expect(hermes.activationCalls).toBe(1);
   });
 
   test("qualifies current server-owned route state before consuming activation authority", async () => {
@@ -386,7 +404,7 @@ describe("CEO command service", () => {
     const service = commandService(hermes, nonces);
     const first = await service.approveInitial(request, session);
     const activation = structuredClone(hermes.activation!);
-    hermes.snapshot = activeSnapshot(snapshot, request, activation, first);
+    hermes.snapshot = structuredClone(hermes.committedSnapshot!);
 
     await expect(commandService(hermes, nonces, "2026-08-04T10:00:31.000Z").approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(first);
     expect(hermes.activation).toEqual(activation);
@@ -399,9 +417,8 @@ describe("CEO command service", () => {
     const { snapshot, request } = fixture();
     const hermes = new HermesFake(snapshot);
     const originalNonces = new MemoryNonces();
-    const first = await commandService(hermes, originalNonces).approveInitial(request, session);
-    const activation = structuredClone(hermes.activation!);
-    hermes.snapshot = activeSnapshot(snapshot, request, activation, first);
+    await commandService(hermes, originalNonces).approveInitial(request, session);
+    hermes.snapshot = structuredClone(hermes.committedSnapshot!);
     const recreatedWithoutRecord = new MemoryNonces();
 
     await expect(commandService(hermes, recreatedWithoutRecord, "2026-08-04T10:00:31.000Z").approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
@@ -414,9 +431,8 @@ describe("CEO command service", () => {
     const hermes = new HermesFake(snapshot);
     const nonces = new MemoryNonces();
     const service = commandService(hermes, nonces);
-    const first = await service.approveInitial(request, session);
-    const activation = hermes.activation!;
-    hermes.snapshot = activeSnapshot(snapshot, request, activation, first);
+    await service.approveInitial(request, session);
+    hermes.snapshot = structuredClone(hermes.committedSnapshot!);
     const calls = nonces.calls;
 
     await expect(service.approveInitial({ ...request, replay_nonce: "different-nonce-1234" }, session)).rejects.toMatchObject({ code: "activation_conflict" });
@@ -435,8 +451,8 @@ describe("CEO command service", () => {
     const { snapshot, request } = fixture();
     const hermes = new HermesFake(snapshot);
     const nonces = new MemoryNonces();
-    const first = await commandService(hermes, nonces).approveInitial(request, session);
-    const active = activeSnapshot(snapshot, request, hermes.activation!, first) as Extract<ActivationSnapshotV1, { status: "active" }>;
+    await commandService(hermes, nonces).approveInitial(request, session);
+    const active = structuredClone(hermes.committedSnapshot!);
     active.grant.approved_by = "another-session-with-at-least-16-chars";
     hermes.snapshot = active;
     const lookups = nonces.lookupCalls;
@@ -523,7 +539,7 @@ describe("CEO command service", () => {
     expect(nonces.records.size).toBe(1);
   });
 
-  test("replays the same already-materialized command after response loss and route-row reordering", async () => {
+  test("returns the authoritative stored result after committed response loss without a second activation", async () => {
     const { snapshot, request } = twoRoutedFixture();
     const nonces = new MemoryNonces();
     const hermes = new HermesFake(snapshot);
@@ -531,10 +547,34 @@ describe("CEO command service", () => {
     await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss after durable write");
     const materialized = structuredClone(hermes.result);
     hermes.currentRoutes.reverse();
+    hermes.activationFailure = true;
 
     await expect(commandService(hermes, nonces).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(materialized);
     expect(hermes.activationWrites).toBe(1);
+    expect(hermes.activationCalls).toBe(1);
+    expect(hermes.activationLookupCalls).toBe(1);
     expect(hermes.qualificationCalls).toBe(2);
     expect(nonces.records.size).toBe(1);
+  });
+
+  test.each([
+    ["malformed", () => ({ status: "found", result: {} })],
+    ["unknown", () => ({ status: "unknown" })],
+    ["unavailable", () => ({ status: "unavailable", reason: "store unavailable" })],
+    ["thrown", () => { throw new Error("lookup failed"); }],
+  ] as const)("fails closed on a %s authoritative replay lookup without a speculative activation", async (_name, lookupResult) => {
+    const { snapshot, request } = fixture();
+    const nonces = new MemoryNonces();
+    const hermes = new HermesFake(snapshot);
+    hermes.activationFailure = true;
+    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss");
+    hermes.activationFailure = false;
+    hermes.activationLookupResponseOverride = lookupResult;
+    const activationCalls = hermes.activationCalls;
+
+    await expect(commandService(hermes, nonces).approveInitial(structuredClone(request), structuredClone(session))).rejects.toMatchObject({ code: "activation_unavailable" });
+    expect(hermes.activationLookupCalls).toBe(1);
+    expect(hermes.activationCalls).toBe(activationCalls);
+    expect(hermes.activationWrites).toBe(0);
   });
 });
