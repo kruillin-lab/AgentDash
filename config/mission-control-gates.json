@@ -1,16 +1,121 @@
 {
   "schema_version": "mission_control_gates_v1",
   "evidence_ttl_seconds": 900,
+  "evidence_max_age_seconds": 900,
+  "max_future_skew_seconds": 0,
   "gates": [
-    { "id": "agentdash_local_authority", "name": "AgentDash local authority" },
-    { "id": "hermes_atomicity", "name": "Hermes atomicity" },
-    { "id": "codeg_replay_safety", "name": "CodeG replay safety" },
-    { "id": "pm_isolation", "name": "PM isolation" },
-    { "id": "workspace_containment", "name": "Workspace containment" },
-    { "id": "route_qualification", "name": "Route qualification" },
-    { "id": "budget_enforcement", "name": "Budget enforcement" },
-    { "id": "verification_independence", "name": "Verification independence" },
-    { "id": "finalization_exactness", "name": "Finalization exactness" },
-    { "id": "reconciliation", "name": "Reconciliation" }
+    {
+      "id": "agentdash_local_authority",
+      "name": "AgentDash local authority",
+      "pass_criteria": "Exact observed loopback, same-origin command session, durable nonce persistence, and one controller owner.",
+      "required_facts": [
+        { "path": "configured_listener_address", "equals": "127.0.0.1" },
+        { "path": "observed_listener_address", "equals": "127.0.0.1" },
+        { "path": "feature_facts.same_origin_command_session", "equals": true },
+        { "path": "feature_facts.nonce_persistence", "equals": true },
+        { "path": "feature_facts.single_controller_owner", "equals": true }
+      ],
+      "no_go_behavior": "Board remains read-only; activation and dispatch are denied."
+    },
+    {
+      "id": "hermes_atomicity",
+      "name": "Hermes atomicity",
+      "pass_criteria": "Lifetime task identity, digest artifacts, action-command/run CAS, and terminal-event support.",
+      "required_facts": [
+        { "path": "feature_facts.lifetime_task_identity", "equals": true },
+        { "path": "feature_facts.digest_artifacts", "equals": true },
+        { "path": "feature_facts.action_command_run_cas", "equals": true },
+        { "path": "feature_facts.terminal_event_support", "equals": true }
+      ],
+      "no_go_behavior": "Cards may be mocked; authoritative lifecycle mutation is denied."
+    },
+    {
+      "id": "codeg_replay_safety",
+      "name": "CodeG replay safety",
+      "pass_criteria": "Unique ensure, definitive lookup, cursor transcript, and exact identity/cancel/runtime/activity facts.",
+      "required_facts": [
+        { "path": "feature_facts.unique_ensure", "equals": true },
+        { "path": "feature_facts.definitive_lookup", "equals": true },
+        { "path": "feature_facts.cursor_transcript", "equals": true },
+        { "path": "feature_facts.exact_identity_cancel_runtime_activity", "equals": true }
+      ],
+      "no_go_behavior": "No model-backed command may start."
+    },
+    {
+      "id": "pm_isolation",
+      "name": "PM isolation",
+      "pass_criteria": "Live inventory and side-effect probes demonstrate zero worker capability.",
+      "required_facts": [
+        { "path": "feature_facts.live_inventory", "equals": true },
+        { "path": "feature_facts.side_effect_probe_completed", "equals": true },
+        { "path": "feature_facts.zero_worker_capability", "equals": true }
+      ],
+      "no_go_behavior": "PM surface is disabled; only typed fixture proposals are permitted."
+    },
+    {
+      "id": "workspace_containment",
+      "name": "Workspace containment",
+      "pass_criteria": "Canonical real path equals the configured CodeG folder for every mutation.",
+      "required_facts": [
+        { "path": "canonical_real_path", "equals_fact": "configured_codeg_path" },
+        { "path": "feature_facts.mutation_containment_enforced", "equals": true }
+      ],
+      "no_go_behavior": "Task remains non-runnable."
+    },
+    {
+      "id": "route_qualification",
+      "name": "Route qualification",
+      "pass_criteria": "Current level-5 evidence exists for the exact route and task-class with no substitution.",
+      "required_facts": [
+        { "path": "feature_facts.qualification_level", "equals": 5 },
+        { "path": "feature_facts.exact_route_task_class", "equals": true },
+        { "path": "feature_facts.current_evidence", "equals": true },
+        { "path": "feature_facts.no_silent_substitution", "equals": true }
+      ],
+      "no_go_behavior": "Exact pair is unavailable; silent substitution is denied."
+    },
+    {
+      "id": "budget_enforcement",
+      "name": "Budget enforcement",
+      "pass_criteria": "Aggregate worst case and one-time reserves are enforceable for automatic and approval dispatch.",
+      "required_facts": [
+        { "path": "feature_facts.aggregate_worst_case_enforced", "equals": true },
+        { "path": "feature_facts.one_time_reserves_enforced", "equals": true },
+        { "path": "feature_facts.approval_dispatch_enforced", "equals": true }
+      ],
+      "no_go_behavior": "Automatic and approval dispatch are both denied."
+    },
+    {
+      "id": "verification_independence",
+      "name": "Verification independence",
+      "pass_criteria": "Every success-capable path has a valid independent tier verifier.",
+      "required_facts": [
+        { "path": "feature_facts.every_success_path_has_independent_tier_verifier", "equals": true }
+      ],
+      "no_go_behavior": "Mandate is rejected by no-start."
+    },
+    {
+      "id": "finalization_exactness",
+      "name": "Finalization exactness",
+      "pass_criteria": "Mutation and expected post-state are bound, CAS-safe, and reconcilable.",
+      "required_facts": [
+        { "path": "feature_facts.mutation_bound", "equals": true },
+        { "path": "feature_facts.expected_post_state_bound", "equals": true },
+        { "path": "feature_facts.cas_safe", "equals": true },
+        { "path": "feature_facts.reconcilable", "equals": true }
+      ],
+      "no_go_behavior": "Success path is unavailable."
+    },
+    {
+      "id": "reconciliation",
+      "name": "Reconciliation",
+      "pass_criteria": "Every uncertain operation exits Working by a positive numeric deadline and unresolved uncertainty becomes inconsistent.",
+      "required_facts": [
+        { "path": "feature_facts.uncertain_operations_deadline_enforced", "equals": true },
+        { "path": "feature_facts.working_exit_deadline_ms", "type": "positive_integer" },
+        { "path": "feature_facts.uncertainty_ends_inconsistent", "equals": true }
+      ],
+      "no_go_behavior": "Dispatch health is not ready; existing uncertainty ends inconsistent."
+    }
   ]
 }
