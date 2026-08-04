@@ -7,46 +7,46 @@
  * structured data when the CLI changes shape.
  */
 
-import { spawn } from "node:child_process"
+import { delimiter } from "node:path"
 
-const HERMES_BIN = process.env.HERMES_BIN ?? "hermes"
+import { launchDetachedCommand, runCommand } from "./command"
+
+const HERMES_BIN = process.env.HERMES_BIN ?? ""
+const HERMES_EXECUTABLE_ALLOWLIST = (process.env.HERMES_EXECUTABLE_ALLOWLIST ?? "")
+  .split(delimiter)
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+
+function hermesEnvironment(): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP", "HERMES_HOME"] as const) {
+    const value = process.env[key]
+    if (value) env[key] = value
+  }
+  return env
+}
 
 export type HermesResult<T> =
   | { ok: true; data: T; raw: string }
   | { ok: false; error: { code: string; message: string }; raw: string }
 
-function runCli(args: string[], opts: { timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
-  return new Promise((resolve) => {
-    const child = spawn(HERMES_BIN, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      shell: process.platform === "win32",
+async function runCli(args: string[], opts: { timeoutMs?: number } = {}): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  try {
+    const result = await runCommand({
+      executable: HERMES_BIN,
+      allowedExecutables: HERMES_EXECUTABLE_ALLOWLIST,
+      args,
+      env: hermesEnvironment(),
+      timeoutMs: opts.timeoutMs,
     })
-    let stdout = ""
-    let stderr = ""
-    let settled = false
-    const timeout = setTimeout(() => {
-      if (settled) return
-      settled = true
-      try { child.kill() } catch {}
-      resolve({ stdout, stderr: stderr + "\n[timeout]", code: null })
-    }, opts.timeoutMs ?? 30000)
-
-    child.stdout?.on("data", (d) => { stdout += d.toString() })
-    child.stderr?.on("data", (d) => { stderr += d.toString() })
-    child.on("exit", (code) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      resolve({ stdout, stderr, code })
-    })
-    child.on("error", (err) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      resolve({ stdout, stderr: stderr + "\n" + err.message, code: null })
-    })
-  })
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr + (result.timedOut ? "\n[timeout]" : "") + (result.outputLimitExceeded ? "\n[output limit exceeded]" : ""),
+      code: result.code,
+    }
+  } catch (error) {
+    return { stdout: "", stderr: error instanceof Error ? error.message : "Hermes command rejected.", code: null }
+  }
 }
 
 // --- status ---
@@ -217,12 +217,12 @@ export type DashboardLaunchResult = {
  */
 export async function dashboardLaunch(port = 9119): Promise<DashboardLaunchResult> {
   // hermes dashboard doesn't daemonize on its own; spawn detached and return.
-  const child = spawn(
-    HERMES_BIN,
-    ["dashboard", "--port", String(port), "--no-open", "--skip-build"],
-    { detached: true, stdio: "ignore", windowsHide: true, shell: process.platform === "win32" },
-  )
-  child.unref()
+  const child = launchDetachedCommand({
+    executable: HERMES_BIN,
+    allowedExecutables: HERMES_EXECUTABLE_ALLOWLIST,
+    args: ["dashboard", "--port", String(port), "--no-open", "--skip-build"],
+    env: hermesEnvironment(),
+  })
   return {
     launched: child.pid != null,
     port,
