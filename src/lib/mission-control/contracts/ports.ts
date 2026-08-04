@@ -108,6 +108,7 @@ const activationQualificationSubject = (value: {
   approval_request_digest: string;
   budget_policy_digest: string;
   route_registry_revision: number;
+  route_registry_snapshot_token: string;
   routes: z.infer<typeof RouteEvidenceV1Schema>[];
   route_snapshot_digest: string;
   valid_until: string;
@@ -122,6 +123,7 @@ const activationQualificationSubject = (value: {
   approval_request_digest: value.approval_request_digest,
   budget_policy_digest: value.budget_policy_digest,
   route_registry_revision: value.route_registry_revision,
+  route_registry_snapshot_token: value.route_registry_snapshot_token,
   routes: value.routes,
   route_snapshot_digest: value.route_snapshot_digest,
   valid_until: value.valid_until,
@@ -157,6 +159,7 @@ export const ActivationQualificationV1Schema = z.object({
   approval_request_digest: DigestSchema,
   budget_policy_digest: DigestSchema,
   route_registry_revision: z.number().int().nonnegative().safe(),
+  route_registry_snapshot_token: DigestSchema,
   routes: z.array(RouteEvidenceV1Schema),
   route_snapshot_digest: DigestSchema,
   valid_until: TimestampSchema,
@@ -193,7 +196,7 @@ export const GetActivationQualificationInputSchema = z.object({
 });
 export type GetActivationQualificationInput = z.infer<typeof GetActivationQualificationInputSchema>;
 export const GetActivationQualificationResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("qualified"), route_registry_revision: z.number().int().nonnegative().safe(), routes: z.array(RouteEvidenceV1Schema) }).strict(),
+  z.object({ status: z.literal("qualified"), route_registry_revision: z.number().int().nonnegative().safe(), route_registry_snapshot_token: DigestSchema, routes: z.array(RouteEvidenceV1Schema) }).strict(),
   z.object({ status: z.literal("conflict") }).strict(),
   z.object({ status: z.literal("unavailable"), reason: z.string().min(1).max(512) }).strict(),
 ]).superRefine((value, context) => {
@@ -349,7 +352,11 @@ export const ActivationSnapshotV1Schema = z.discriminatedUnion("status", [
   }
 });
 export type ActivationSnapshotV1 = z.infer<typeof ActivationSnapshotV1Schema>;
-export const LookupActivationByCommandResultSchema = z.discriminatedUnion("status", [z.object({ status: z.literal("not_found") }).strict(), z.object({ status: z.literal("found"), result: ActivationResultV1Schema }).strict()]);
+const ActiveActivationSnapshotV1Schema = ActivationSnapshotV1Schema.refine(
+  (value): value is Extract<ActivationSnapshotV1, { status: "active" }> => value.status === "active",
+  "authoritative command lookup requires a complete active activation record",
+);
+export const LookupActivationByCommandResultSchema = z.discriminatedUnion("status", [z.object({ status: z.literal("not_found") }).strict(), z.object({ status: z.literal("found"), activation: ActiveActivationSnapshotV1Schema }).strict()]);
 export type LookupActivationByCommandResult = z.infer<typeof LookupActivationByCommandResultSchema>;
 export const PrepareActionInputSchema = z.object({ task_id: TaskIdSchema, authority: ActionAuthorityV1Schema, command: ActionCommandV1Schema, command_headroom: BudgetV1Schema, task_reserve_refs: z.array(ReceiptIdSchema), launch_intent_digest: DigestSchema }).strict().superRefine((value, context) => {
   const authority = value.authority;

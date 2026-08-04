@@ -7,14 +7,14 @@ import { z } from "zod";
 
 import { MAX_COMMAND_SESSION_TTL_MS } from "./command-session";
 
-const nonceInputSchema = z
+const nonceLookupInputSchema = z
   .object({
     session_id: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     nonce: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     expires_at: z.number().int().positive(),
-    binding_digest: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
+const nonceInputSchema = nonceLookupInputSchema.extend({ binding_digest: z.string().regex(/^[a-f0-9]{64}$/) });
 const nonceRecordSchema = z.object({
   schema_version: z.literal("nonce_consumption_v2"),
   binding_digest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -25,15 +25,15 @@ export type NonceConsumption =
   | { status: "consumed" | "replayed_same"; consumed_at: number }
   | { status: "replayed_conflict" | "expired" };
 export type NonceReplayLookup =
-  | { status: "replayed_same"; consumed_at: number }
-  | { status: "replayed_conflict" | "expired" | "missing" };
+  | { status: "found"; binding_digest: string; consumed_at: number }
+  | { status: "expired" | "missing" };
 type ExistingNonceResult =
-  | { status: "replayed_same"; consumed_at: number }
-  | { status: "replayed_conflict" | "expired" };
+  | { status: "found"; binding_digest: string; consumed_at: number }
+  | { status: "expired" };
 
 export interface NonceStore {
   consume(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceConsumption>;
-  lookup(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceReplayLookup>;
+  lookup(input: { session_id: string; nonce: string; expires_at: number }): Promise<NonceReplayLookup>;
 }
 
 export interface CreateNonceStoreOptions {
@@ -125,7 +125,7 @@ function noncePath(location: NonceLocation, sessionId: string, nonce: string): s
 async function existingNonceResult(
   destination: string,
   location: NonceLocation,
-  input: z.infer<typeof nonceInputSchema>,
+  input: z.infer<typeof nonceLookupInputSchema>,
   currentTime: number,
 ): Promise<ExistingNonceResult> {
   try {
@@ -148,9 +148,7 @@ async function existingNonceResult(
         || record.data.consumed_at > currentTime
         || record.data.consumed_at >= record.data.expires_at) return { status: "expired" };
       await recheckNonceLocation(location);
-      return record.data.binding_digest === input.binding_digest
-        ? { status: "replayed_same", consumed_at: record.data.consumed_at }
-        : { status: "replayed_conflict" };
+      return { status: "found", binding_digest: record.data.binding_digest, consumed_at: record.data.consumed_at };
     } finally {
       await handle.close();
     }
@@ -163,7 +161,7 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
   return {
     async lookup(input): Promise<NonceReplayLookup> {
       const currentTime = now();
-      const parsed = nonceInputSchema.safeParse(input);
+      const parsed = nonceLookupInputSchema.safeParse(input);
       if (!Number.isSafeInteger(currentTime) || !parsed.success || parsed.data.expires_at <= currentTime || parsed.data.expires_at - currentTime > MAX_COMMAND_SESSION_TTL_MS || !state_directory) return { status: "expired" };
       try {
         const location = await existingNonceLocation(state_directory);
@@ -212,7 +210,11 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
           try {
             const location = await prepareNonceLocation(state_directory);
-            return await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), location, parsed.data, currentTime);
+            const existing = await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), location, parsed.data, currentTime);
+            if (existing.status === "expired") return existing;
+            return existing.binding_digest === parsed.data.binding_digest
+              ? { status: "replayed_same", consumed_at: existing.consumed_at }
+              : { status: "replayed_conflict" };
           } catch {
             return { status: "expired" };
           }

@@ -138,11 +138,11 @@ class MemoryNonces implements NonceStore {
   calls = 0;
   lookupCalls = 0;
   constructor(private readonly consumedAt = nowMs) {}
-  async lookup(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceReplayLookup> {
+  async lookup(input: { session_id: string; nonce: string; expires_at: number }): Promise<NonceReplayLookup> {
     this.lookupCalls += 1;
     const record = this.records.get(`${input.session_id}:${input.nonce}`);
     if (!record) return { status: "missing" };
-    return record.digest === input.binding_digest ? { status: "replayed_same", consumed_at: record.consumed_at } : { status: "replayed_conflict" };
+    return { status: "found", binding_digest: record.digest, consumed_at: record.consumed_at };
   }
   async consume(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceConsumption> {
     this.calls += 1;
@@ -156,6 +156,7 @@ class MemoryNonces implements NonceStore {
 class RouteRegistryFake {
   qualificationCalls = 0;
   routeRegistryRevision = 1;
+  routeRegistrySnapshotToken = canonicalDigest({ registry: "test", generation: 1 });
   currentRoutes: ReturnType<typeof routeEvidence>[];
   qualificationStatus: "qualified" | "conflict" | "unavailable" = "qualified";
   afterRowsRead: (() => void) | null = null;
@@ -172,14 +173,15 @@ class RouteRegistryFake {
     if (this.qualificationStatus === "conflict") return { status: "conflict" };
     if (this.qualificationStatus === "unavailable") return { status: "unavailable", reason: "registry unavailable" };
     const revision = this.routeRegistryRevision;
+    const snapshotToken = this.routeRegistrySnapshotToken;
     const routesById = new Map(this.currentRoutes.map((route) => [route.route_id, route]));
     const routes = canonicalizeActivationRoutes(input.requirements.flatMap((requirement) => {
       const route = routesById.get(requirement.route_id);
       return route ? [structuredClone(route)] : [];
     }));
     this.afterRowsRead?.();
-    if (this.routeRegistryRevision !== revision || routesById.size !== this.currentRoutes.length || routes.length !== input.requirements.length) return { status: "conflict" };
-    return { status: "qualified", route_registry_revision: revision, routes };
+    if (this.routeRegistryRevision !== revision || this.routeRegistrySnapshotToken !== snapshotToken || routesById.size !== this.currentRoutes.length || routes.length !== input.requirements.length) return { status: "conflict" };
+    return { status: "qualified", route_registry_revision: revision, route_registry_snapshot_token: snapshotToken, routes };
   }
 }
 
@@ -205,7 +207,9 @@ class HermesFake {
   async lookupActivationByCommand(command_id: string) {
     this.activationLookupCalls += 1;
     if (this.activationLookupResponseOverride) return await this.activationLookupResponseOverride(command_id) as any;
-    return this.result?.command_id === command_id ? { status: "found" as const, result: this.result } : { status: "not_found" as const };
+    return this.committedSnapshot?.command.command_id === command_id
+      ? { status: "found" as const, activation: structuredClone(this.committedSnapshot) }
+      : { status: "not_found" as const };
   }
   async activateMandate(input: ActivateMandateInput) {
     this.activationCalls += 1;
@@ -318,7 +322,12 @@ describe("CEO command service", () => {
       at: now,
       requirements: [{ route_id: sealedRoute.route_id, task_class: sealedRoute.task_class, route_proof_id: sealedRoute.route_proof_id, route_proof_digest: sealedRoute.evidence_digest }],
     }]);
-    expect(hermes.activation?.qualification).toMatchObject({ source_snapshot_digest: snapshot.snapshot_digest, route_registry_revision: 1, routes: [sealedRoute] });
+    expect(hermes.activation?.qualification).toMatchObject({
+      source_snapshot_digest: snapshot.snapshot_digest,
+      route_registry_revision: 1,
+      route_registry_snapshot_token: routes.routeRegistrySnapshotToken,
+      routes: [sealedRoute],
+    });
   });
 
   test("canonicalizes route identities with locale-invariant code-unit ordering", () => {
@@ -355,6 +364,30 @@ describe("CEO command service", () => {
     const routes = new RouteRegistryFake(snapshot);
     const nonces = new MemoryNonces();
     routes.afterRowsRead = () => { routes.routeRegistryRevision += 2; };
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
+    expect(routes.qualificationCalls).toBe(1);
+    expect(nonces.calls).toBe(0);
+    expect(hermes.activationCalls).toBe(0);
+    expect(hermes.activationWrites).toBe(0);
+  });
+
+  test.each([
+    ["revision ABA", (routes: RouteRegistryFake) => {
+      const revision = routes.routeRegistryRevision;
+      routes.routeRegistryRevision = revision + 1;
+      routes.routeRegistrySnapshotToken = canonicalDigest({ registry: "test", generation: 2 });
+      routes.routeRegistryRevision = revision;
+    }],
+    ["restart revision reuse", (routes: RouteRegistryFake) => {
+      routes.routeRegistrySnapshotToken = canonicalDigest({ registry: "restarted", generation: 1 });
+    }],
+  ] as const)("rejects %s during qualification before nonce or Hermes mutation", async (_name, mutateRegistry) => {
+    const { snapshot, request } = routedFixture();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    const nonces = new MemoryNonces();
+    routes.afterRowsRead = () => mutateRegistry(routes);
 
     await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
     expect(routes.qualificationCalls).toBe(1);
@@ -576,12 +609,37 @@ describe("CEO command service", () => {
     const { snapshot, request } = fixture();
     const nonces = new MemoryNonces();
     const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
     hermes.activationFailure = true;
-    await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss");
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss");
     hermes.activationFailure = false;
-    await commandService(hermes, nonces).approveInitial(request, session);
+    await commandService(hermes, nonces, now, routes).approveInitial(request, session);
     expect(hermes.activation).not.toBeNull();
     expect(hermes.activation?.command.created_at).toBe(now);
+    expect(hermes.activationLookupCalls).toBe(1);
+    expect(routes.qualificationCalls).toBe(2);
+    expect(nonces.calls).toBe(1);
+  });
+
+  test("never rebinds an uncommitted consumed nonce after the registry snapshot changes", async () => {
+    const { snapshot, request } = routedFixture();
+    const nonces = new MemoryNonces();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    hermes.activationFailure = true;
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss");
+    hermes.activationFailure = false;
+    routes.routeRegistryRevision += 1;
+    routes.routeRegistrySnapshotToken = canonicalDigest({ registry: "test", generation: 2 });
+    (routes.currentRoutes[0] as any).route_proof_id = "proof-route-execute-replacement";
+    routes.currentRoutes[0].evidence_digest = canonicalDigest({ replaced: true });
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "replay_conflict" });
+    expect(hermes.activationLookupCalls).toBe(1);
+    expect(routes.qualificationCalls).toBe(2);
+    expect(nonces.calls).toBe(1);
+    expect(hermes.activationCalls).toBe(1);
+    expect(hermes.activationWrites).toBe(0);
   });
 
   test("treats reordered current route rows as the same qualified snapshot on retry", async () => {
@@ -599,7 +657,7 @@ describe("CEO command service", () => {
     expect(nonces.records.size).toBe(1);
   });
 
-  test("returns the authoritative stored result after committed response loss without a second activation", async () => {
+  test("recovers the original committed activation before requalification after response loss", async () => {
     const { snapshot, request } = twoRoutedFixture();
     const nonces = new MemoryNonces();
     const hermes = new HermesFake(snapshot);
@@ -607,19 +665,47 @@ describe("CEO command service", () => {
     hermes.loseResponseAfterWrite = true;
     await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss after durable write");
     const materialized = structuredClone(hermes.result);
-    routes.currentRoutes.reverse();
+    routes.routeRegistryRevision = 99;
+    routes.routeRegistrySnapshotToken = canonicalDigest({ registry: "restarted", generation: 99 });
+    (routes.currentRoutes[0] as any).route_proof_id = "proof-route-execute-replacement";
+    routes.currentRoutes[0].evidence_digest = canonicalDigest({ replaced: true });
     hermes.activationFailure = true;
 
     await expect(commandService(hermes, nonces, now, routes).approveInitial(structuredClone(request), structuredClone(session))).resolves.toEqual(materialized);
     expect(hermes.activationWrites).toBe(1);
     expect(hermes.activationCalls).toBe(1);
     expect(hermes.activationLookupCalls).toBe(1);
-    expect(routes.qualificationCalls).toBe(2);
+    expect(routes.qualificationCalls).toBe(1);
+    expect(nonces.calls).toBe(1);
     expect(nonces.records.size).toBe(1);
   });
 
   test.each([
-    ["malformed", () => ({ status: "found", result: {} })],
+    ["current source", (hermes: HermesFake, retrySession: CommandSessionV1) => {
+      if (hermes.snapshot.status !== "pending") throw new Error("pending fixture changed");
+      hermes.snapshot = ActivationSnapshotV1Schema.parse({ ...hermes.snapshot, snapshot_digest: canonicalDigest({ replacement: true }) });
+      return retrySession;
+    }],
+    ["authenticated session", (_hermes: HermesFake, retrySession: CommandSessionV1) => ({ ...retrySession, issued_at: retrySession.issued_at - 1 })],
+  ] as const)("rejects a recovered activation whose complete record disagrees with the %s", async (_name, mutate) => {
+    const { snapshot, request } = fixture();
+    const nonces = new MemoryNonces();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    hermes.loseResponseAfterWrite = true;
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toThrow("simulated response loss after durable write");
+    const retrySession = mutate(hermes, structuredClone(session));
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(structuredClone(request), retrySession)).rejects.toMatchObject({ code: "activation_conflict" });
+    expect(hermes.activationLookupCalls).toBe(1);
+    expect(routes.qualificationCalls).toBe(1);
+    expect(nonces.calls).toBe(1);
+    expect(hermes.activationCalls).toBe(1);
+  });
+
+  test.each([
+    ["malformed", () => ({ status: "found", activation: {} })],
+    ["result-only", (hermes: HermesFake) => ({ status: "found", result: hermes.result })],
     ["unknown", () => ({ status: "unknown" })],
     ["unavailable", () => ({ status: "unavailable", reason: "store unavailable" })],
     ["thrown", () => { throw new Error("lookup failed"); }],
@@ -630,7 +716,7 @@ describe("CEO command service", () => {
     hermes.activationFailure = true;
     await expect(commandService(hermes, nonces).approveInitial(request, session)).rejects.toThrow("simulated response loss");
     hermes.activationFailure = false;
-    hermes.activationLookupResponseOverride = lookupResult;
+    hermes.activationLookupResponseOverride = () => lookupResult(hermes);
     const activationCalls = hermes.activationCalls;
 
     await expect(commandService(hermes, nonces).approveInitial(structuredClone(request), structuredClone(session))).rejects.toMatchObject({ code: "activation_unavailable" });

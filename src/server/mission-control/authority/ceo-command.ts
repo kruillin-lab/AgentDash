@@ -185,6 +185,7 @@ function validateConsumedAt(consumedAt: number, snapshot: ExecutableActivationSn
 function qualificationFor(
   snapshot: PendingActivationSnapshot,
   routeRegistryRevision: number,
+  routeRegistrySnapshotToken: string,
   routes: ActivationQualificationV1["routes"],
 ): ActivationQualificationV1 {
   const taskSpecDigest = canonicalDigest(snapshot.task_spec);
@@ -202,6 +203,7 @@ function qualificationFor(
     approval_request_digest: canonicalDigest(snapshot.approval_request),
     budget_policy_digest: canonicalDigest(snapshot.budget_policy),
     route_registry_revision: routeRegistryRevision,
+    route_registry_snapshot_token: routeRegistrySnapshotToken,
     routes: canonicalRoutes,
     route_snapshot_digest: canonicalDigest(canonicalRoutes),
     valid_until: new Date(validUntil).toISOString(),
@@ -323,6 +325,46 @@ function activationResultFor(command: CEOCommandV1, grant: ApprovalGrantV1, mand
   });
 }
 
+async function lookupAuthoritativeActivation(hermes: AuthorityHermesPort, bindingDigest: string): Promise<ActiveActivationSnapshot | null> {
+  const parsedBinding = DigestSchema.safeParse(bindingDigest);
+  if (!parsedBinding.success) fail("activation_unavailable", "The persisted replay binding is malformed.");
+  let rawLookup: unknown;
+  try {
+    rawLookup = await hermes.lookupActivationByCommand(canonicalActivationCommandId(parsedBinding.data));
+  } catch {
+    fail("activation_unavailable", "The authoritative activation lookup is unavailable.");
+  }
+  const lookup = LookupActivationByCommandResultSchema.safeParse(rawLookup);
+  if (!lookup.success) fail("activation_unavailable", "The authoritative activation lookup is malformed.");
+  return lookup.data.status === "found" ? lookup.data.activation : null;
+}
+
+function recoveredActivationResult(
+  session: CommandSessionV1,
+  request: CEOInitialApprovalRequestV1,
+  currentSnapshot: PendingActivationSnapshot,
+  recovered: ActiveActivationSnapshot,
+  bindingDigest: string,
+  consumedAt: number,
+): ActivationResultV1 {
+  validateDisplayedBindings(request, recovered);
+  validateQualification(recovered, recovered.qualification);
+  validateConsumedAt(recovered.consumed_at, recovered, recovered.qualification);
+  if (canonicalDigest(source(currentSnapshot)) !== canonicalDigest(source(recovered))
+    || recovered.qualification.budget_policy_digest !== canonicalDigest(currentSnapshot.budget_policy)
+    || recovered.replay_binding_digest !== bindingDigest
+    || recovered.consumed_at !== consumedAt
+    || replayBindingDigest(session, request, recovered, recovered.qualification.qualification_digest) !== bindingDigest) {
+    fail("activation_conflict", "The authoritative activation does not match the current replay source.");
+  }
+  const authority = materializeAuthority(session, request, recovered, recovered.qualification, bindingDigest, consumedAt);
+  const result = exactResult(recovered.result, authority.command, authority.grant, recovered.mandate, recovered.qualification);
+  if (canonicalDigest(recovered.command) !== canonicalDigest(authority.command) || canonicalDigest(recovered.grant) !== canonicalDigest(authority.grant)) {
+    fail("activation_conflict", "The authoritative activation command is not byte-identical.");
+  }
+  return result;
+}
+
 export class CEOCommandService {
   private readonly now: () => Date;
 
@@ -351,13 +393,20 @@ export class CEOCommandService {
       if (canonicalDigest(snapshot.command) !== canonicalDigest(authority.command) || canonicalDigest(snapshot.grant) !== canonicalDigest(authority.grant)) {
         fail("activation_conflict", "The active command replay is not byte-identical.");
       }
-      const nonce = await this.dependencies.nonces.lookup({ session_id: session.session_id, nonce: request.replay_nonce, expires_at: session.expires_at, binding_digest: bindingDigest });
-      if (nonce.status !== "replayed_same" || nonce.consumed_at !== snapshot.consumed_at) fail("activation_conflict", "The active command requires the original replay-bound nonce record.");
+      const nonce = await this.dependencies.nonces.lookup({ session_id: session.session_id, nonce: request.replay_nonce, expires_at: session.expires_at });
+      if (nonce.status !== "found" || nonce.binding_digest !== bindingDigest || nonce.consumed_at !== snapshot.consumed_at) fail("activation_conflict", "The active command requires the original replay-bound nonce record.");
       return result;
     }
 
     validatePendingSource(snapshot);
     const trustedNow = this.now().getTime();
+    const persistedNonce = await this.dependencies.nonces.lookup({ session_id: session.session_id, nonce: request.replay_nonce, expires_at: session.expires_at });
+    if (persistedNonce.status === "expired") fail("activation_expired", "The replay nonce or command session has expired.");
+    if (persistedNonce.status === "found") {
+      const recovered = await lookupAuthoritativeActivation(this.dependencies.hermes, persistedNonce.binding_digest);
+      if (recovered !== null) return recoveredActivationResult(session, request, snapshot, recovered, persistedNonce.binding_digest, persistedNonce.consumed_at);
+    }
+
     validatePendingDeadlines(snapshot, trustedNow);
     const rawQualification = GetActivationQualificationResultSchema.safeParse(await this.dependencies.routes.qualifyActivation({
       source_snapshot_digest: snapshot.snapshot_digest,
@@ -372,32 +421,32 @@ export class CEOCommandService {
     }));
     if (!rawQualification.success || rawQualification.data.status === "unavailable") fail("activation_unavailable", "Current route qualification is unavailable.");
     if (rawQualification.data.status === "conflict") fail("activation_conflict", "The activation source changed during qualification.");
-    const qualification = qualificationFor(snapshot, rawQualification.data.route_registry_revision, rawQualification.data.routes);
+    const qualification = qualificationFor(snapshot, rawQualification.data.route_registry_revision, rawQualification.data.route_registry_snapshot_token, rawQualification.data.routes);
     validateQualification(snapshot, qualification);
+    const candidateBindingDigest = replayBindingDigest(session, request, snapshot, qualification.qualification_digest);
+    if (persistedNonce.status === "found" && persistedNonce.binding_digest !== candidateBindingDigest) fail("replay_conflict", "The replay nonce is bound to a different command.");
     const noStart = runNoStartChecks({ task_spec: snapshot.task_spec, mandate: snapshot.mandate, routes: qualification.routes, budget_policy: snapshot.budget_policy, now: new Date(trustedNow).toISOString() });
     if (!noStart.ready) fail("activation_unavailable", "Fresh no-start qualification rejected activation.");
 
-    const bindingDigest = replayBindingDigest(session, request, snapshot, qualification.qualification_digest);
-    const nonce = await this.dependencies.nonces.consume({ session_id: session.session_id, nonce: request.replay_nonce, expires_at: session.expires_at, binding_digest: bindingDigest });
-    if (nonce.status === "expired") fail("activation_expired", "The replay nonce or command session has expired.");
-    if (nonce.status === "replayed_conflict") fail("replay_conflict", "The replay nonce is bound to a different command.");
-    if (!("consumed_at" in nonce)) fail("activation_unavailable", "The replay nonce state is unavailable.");
-    validateConsumedAt(nonce.consumed_at, snapshot, qualification);
-    const authority = materializeAuthority(session, request, snapshot, qualification, bindingDigest, nonce.consumed_at);
-    const expectedResult = activationResultFor(authority.command, authority.grant, snapshot.mandate, qualification);
-    if (nonce.status === "replayed_same") {
-      let rawLookup: unknown;
-      try {
-        rawLookup = await this.dependencies.hermes.lookupActivationByCommand(authority.command.command_id);
-      } catch {
-        fail("activation_unavailable", "The authoritative activation lookup is unavailable.");
-      }
-      const lookup = LookupActivationByCommandResultSchema.safeParse(rawLookup);
-      if (!lookup.success) fail("activation_unavailable", "The authoritative activation lookup is malformed.");
-      if (lookup.data.status === "found") {
-        return exactResult(lookup.data.result, authority.command, authority.grant, snapshot.mandate, qualification);
+    let bindingDigest = candidateBindingDigest;
+    let consumedAt: number;
+    if (persistedNonce.status === "found") {
+      bindingDigest = DigestSchema.parse(persistedNonce.binding_digest);
+      consumedAt = persistedNonce.consumed_at;
+    } else {
+      const nonce = await this.dependencies.nonces.consume({ session_id: session.session_id, nonce: request.replay_nonce, expires_at: session.expires_at, binding_digest: bindingDigest });
+      if (nonce.status === "expired") fail("activation_expired", "The replay nonce or command session has expired.");
+      if (nonce.status === "replayed_conflict") fail("replay_conflict", "The replay nonce is bound to a different command.");
+      if (!("consumed_at" in nonce)) fail("activation_unavailable", "The replay nonce state is unavailable.");
+      consumedAt = nonce.consumed_at;
+      if (nonce.status === "replayed_same") {
+        const recovered = await lookupAuthoritativeActivation(this.dependencies.hermes, bindingDigest);
+        if (recovered !== null) return recoveredActivationResult(session, request, snapshot, recovered, bindingDigest, consumedAt);
       }
     }
+    validateConsumedAt(consumedAt, snapshot, qualification);
+    const authority = materializeAuthority(session, request, snapshot, qualification, bindingDigest, consumedAt);
+    const expectedResult = activationResultFor(authority.command, authority.grant, snapshot.mandate, qualification);
     const activated = ActivateMandateResultSchema.safeParse(await this.dependencies.hermes.activateMandate({
       expected_snapshot_digest: snapshot.snapshot_digest,
       request_digest: snapshot.request_digest,
@@ -408,7 +457,7 @@ export class CEOCommandService {
       source_approval_request: snapshot.approval_request,
       qualification,
       replay_binding_digest: bindingDigest,
-      consumed_at: nonce.consumed_at,
+      consumed_at: consumedAt,
       command: authority.command,
       grant: authority.grant,
       mandate: snapshot.mandate,
