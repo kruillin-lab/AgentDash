@@ -162,9 +162,12 @@ export type SetCEOInputInput = { task_id: string; request: CEOInputRequestV1 | n
 export type TerminalIntentInput = { task_id: string; outcome: TaskOutcomeV1; receipt_digest: string; expected_nonterminal: true };
 
 export interface HermesPort {
+  lookupIntake(request_id: string): Promise<LookupIntakeResult>;
   persistIntake(input: PersistIntakeInput): Promise<PersistIntakeResult>;
   ensureArtifact(input: EnsureArtifactInput): Promise<EnsureArtifactResult>;
-  activateMandate(input: ActivateMandateInput): Promise<void>;
+  getActivationSnapshot(task_id: string): Promise<ActivationSnapshotV1>;
+  lookupActivationByCommand(command_id: string): Promise<LookupActivationByCommandResult>;
+  activateMandate(input: ActivateMandateInput): Promise<ActivateMandateResult>;
   prepareAction(input: PrepareActionInput): Promise<PreparedActionResult>;
   bindWorkerSession(input: BindWorkerSessionInput): Promise<void>;
   appendRunEvent(input: AppendRunEventInput): Promise<void>;
@@ -222,7 +225,10 @@ export interface ActivationPolicyPort {
   decide(task: TaskSpecV1, mandate: ExecutionMandateV1, routes: RouteEvidenceV1[]): Promise<ActivationDecisionV1>;
 }
 export interface AgentBrainPort { recallReviewed(query: string, project_id: string): Promise<ReviewedRecallV1[]>; }
-export interface RouteRegistryPort { requireLevel5(route_id: string, task_class: string, at: string): Promise<RouteEvidenceV1>; }
+export interface RouteRegistryPort {
+  qualifyActivation(input: GetActivationQualificationInput): Promise<GetActivationQualificationResult>;
+  requireLevel5(route_id: string, task_class: string, at: string): Promise<RouteEvidenceV1>;
+}
 export interface RecoveryOutboxPort {
   journal(result: AdapterResultEnvelopeV1): Promise<void>;
   pending(): Promise<AdapterResultEnvelopeV1[]>;
@@ -443,15 +449,34 @@ expect(codeg.ensureWork).not.toHaveBeenCalled();
 
 **Files in the Hermes worktree:**
 
+- Create: `hermes_cli/kanban_controller.py`
+- Create: `tests/hermes_cli/test_kanban_controller.py`
 - Modify: `hermes_cli/kanban_db.py`
 - Modify: `hermes_cli/kanban.py`
+- Modify: `pyproject.toml`
 - Modify: `tests/hermes_cli/test_kanban_db.py`
 - Modify: `tests/hermes_cli/test_kanban_cli.py`
 - Modify: `tests/plugins/test_kanban_attachments.py`
 - Modify: `tests/plugins/test_kanban_worker_runs.py`
 - Modify: `website/docs/user-guide/features/kanban.md`
 
-**Interfaces:** The supported JSON bridge exposes `intake-persist`, `artifact-ensure`, `mandate-activate`, `action-prepare`, `run-bind`, `run-event`, `run-close`, `ceo-input-set`, and `terminal-intent`. `intake-persist` is one database transaction over lifetime request identity, TaskSpec, mandate, route snapshot, and initial activation/request artifact.
+**Interfaces:** A dedicated `hermes-kanban-controller` console entry point—not registered in `hermes`, `/kanban`, model tools, plugins, or MCP—exposes exactly the thirteen `HermesPort` operations: `intake-lookup`, `intake-persist`, `artifact-ensure`, `activation-snapshot`, `activation-lookup`, `mandate-activate`, `action-prepare`, `run-bind`, `run-event`, `run-close`, `ceo-input-set`, `terminal-intent`, and `project-board`. A separate operator-only `hermes-kanban-controller-admin` entry point exposes `capability-bootstrap`, `capability-rotate-stage`, `capability-rotate-probe`, `capability-revoke`, and redacted `capability-status`; it is never callable by the PM, workers, or the thirteen-operation adapter and is absent from every public/agent surface. Only a fixed operation enum appears in argv. One bounded UTF-8 strict JSON request arrives on stdin. Exits `0` and `64` write exactly one strict JSON response to stdout under versioned protocols `hermes-kanban-controller/1` or `hermes-kanban-controller-admin/1`; exit `70` is the sole empty-stdout exception defined below. Payloads, tokens, paths, and digests never appear in argv, environment, or temporary files. A complete, schema-valid domain response—success or typed error—exits zero. Any nonzero exit, missing/truncated/multiple output, request/operation mismatch, invalid digest, or malformed envelope is transport `unknown`; only a matching zero-exit `not_found` response is authoritative absence. `intake-persist` validates the deterministic AgentDash identity `task-${request_digest}` and atomically persists lifetime request identity, task, immutable artifacts, and initial activation/request state. `activation-lookup` returns the complete active activation record, not a result fragment, so a consumed nonce can recover the original command before any fresh qualification. Lookup and board operations are observation-only and return one coherent database snapshot. Current route qualification remains an AgentDash `RouteRegistryPort` responsibility; Hermes validates and preserves the exact immutable qualification—including registry revision and `route_registry_snapshot_token`—inside activation CAS but never judges live registry state.
+
+**Gate 0 protocol freeze:** Runtime authorization is exactly `{ "kind": "active_capability", "capability_id": string, "generation": positive_integer, "token": base64url_32_bytes }`. Admin authorization and closed payloads are operation-specific:
+
+| Admin operation | Authorization | Exact payload fields |
+| --- | --- | --- |
+| `capability-bootstrap` | `{ "kind": "os_identity_bootstrap" }`; process verifies its effective dedicated controller SID/uid and an empty protected controller board root | `board_uuid`, `candidate_commit`, `candidate_tree`, `executable_sha256`, `capability_id`, `generation` fixed to `1`, `token`, `allowed_operation_digest`, `not_before`, `not_after` |
+| `capability-rotate-stage` | current active capability tuple | `new_capability_id`, `new_generation` exactly current + 1, `new_token`, `allowed_operation_digest`, `not_before`, `not_after`, `expected_active_generation` |
+| `capability-rotate-probe` | `{ "kind": "staged_capability", "capability_id": string, "generation": positive_integer, "token": base64url_32_bytes }` | `expected_previous_capability_id`, `expected_previous_generation`; success atomically promotes staged and revokes previous |
+| `capability-revoke` | current active capability tuple | `target_capability_id`, `target_generation`, `reason_code`, `expected_active_generation`; cannot revoke the sole active generation |
+| `capability-status` | current active capability tuple | no fields; returns ids/generations/state/validity/digests only |
+
+Admin success results are also exact: bootstrap returns `{ board_uuid, capability_id, generation: 1, state: "active", schema_version, candidate_commit, candidate_tree, executable_sha256 }`; rotate-stage returns `{ board_uuid, capability_id, generation, state: "staged" }`; rotate-probe returns `{ board_uuid, capability_id, generation, state: "active", revoked_capability_id, revoked_generation }`; revoke returns `{ board_uuid, capability_id, generation, state: "revoked" }`; status returns `{ board_uuid, schema_version, candidate_commit, candidate_tree, executable_sha256, active_generation, capabilities }`, where `capabilities` is a generation-ascending array of exact `{ capability_id, generation, state, allowed_operation_digest, not_before, not_after }` rows and `state` is `staged`, `active`, or `revoked`. No result exposes token material or token hashes.
+
+Both protocols use the same closed response union. Success is `{ protocol, request_id, operation, ok: true, result_digest, result, error: null, observed_at }`. A domain error is `{ protocol, request_id, operation, ok: false, result_digest: null, result: null, error: { code, message, disposition }, observed_at }`, where all three error values come from fixed enums and `disposition` is one of `reconcile`, `operator_action`, or `do_not_retry`; no dynamic detail is allowed. A pre-parse diagnostic is `{ protocol, request_id: null, operation: valid_argv_operation_or_null, ok: false, result_digest: null, result: null, error: { code: "invalid_request", message: "The controller request is invalid.", disposition: "do_not_retry" }, observed_at }`. Exit `0` means exactly one complete success/domain-error envelope and exit `64` means exactly one pre-parse diagnostic. Exit `70` is reserved for an unexpected failure before a trustworthy envelope exists: it emits empty stdout and exactly the fixed ASCII stderr line `controller_internal_unknown`, with no dynamic detail. Every nonzero exit is `unknown` to the adapter regardless of output.
+
+The domain-error enum is exact: `unauthorized` → `The controller capability is not authorized.` / `operator_action`; `invalid_request` → `The controller request is invalid.` / `do_not_retry`; `conflict` → `The controller state conflicts with this request.` / `reconcile`; `stale_revision` → `The controller revision is stale.` / `reconcile`; `not_found` → `The requested controller record was not found.` / `do_not_retry`; `migration_required` → `The controller schema requires operator migration.` / `operator_action`; `busy` → `The controller database is busy.` / `reconcile`; `isolation_required` → `Controller isolation is not proven.` / `operator_action`; `bootstrap_forbidden` → `Controller bootstrap is not permitted.` / `operator_action`; `internal_unknown` → `The controller outcome is unknown.` / `reconcile`. Identifiers are 16–128 characters from `[A-Za-z0-9_-]`; UUIDs are canonical lowercase; Git commit/tree ids are 40 lowercase hex characters; SHA-256 values are 64 lowercase hex characters; tokens are unpadded base64url strings that decode to exactly 32 bytes; generations are positive safe integers; timestamps are UTC RFC 3339 with millisecond precision. `reason_code` is one of `compromised`, `rotated`, `operator_retired`, or `test_cleanup`. Every per-operation payload/result is a closed translation of the committed AgentDash port DTO—no transport-only optional fields.
 
 ```py
 results = concurrently(lambda: db.persist_intake(same_request), count=8)
@@ -461,13 +486,22 @@ assert db.count_artifact_set(result.task_id, intake_digest) == 1
 
 - [ ] Create the clean worktree from a reviewed upstream commit and record the source commit in gate evidence. Do not copy changes from the installed dirty checkout.
 - [ ] Add failing concurrency tests: eight creators with one request id must return one lifetime task even after archive; same artifact key/digest must be idempotent; mismatched digest must fail; one action authority must create one logical command and one external run.
+- [ ] Add failing identity/recovery tests for the deterministic explicit task id, a conflicting pre-existing task id, archived `intake-lookup`, pending/active activation snapshot consistency, and activation lookup after response loss.
 - [ ] Add crash/race tests around authority redemption, command preparation, per-command headroom, task-reserve references, launch intent, session binding, event append, close, CEO-input state, and terminal intent CAS.
+- [ ] Add failing observation/containment tests: repeated `project-board` reads cause zero writes, events, or state changes; controller-owned cards cannot enter generic claim/dispatch; and every bridge call without the controller capability is rejected.
+- [ ] Add strict transport tests for duplicate JSON keys, unknown fields, invalid UTF-8/numbers, BOM, trailing or multiple documents, excessive depth/size, argv/envelope operation mismatch, digest mismatch, stdout pollution, and seeded-secret absence from stdout, stderr, errors, audits, receipts, and evidence. Malformed, truncated, timed-out, or killed-process responses are `unknown`, never `not_found`.
+- [ ] Implement the frozen runtime/admin request, success, domain-error, pre-parse, authorization, and exit-code schemas above with strict unknown-field rejection. A pre-parse diagnostic has `request_id: null` and is never a valid adapter result. Require the AgentDash canonical-JSON subset exactly: JavaScript `JSON.stringify` number/string encoding and default UTF-16 code-unit key ordering, with cross-language vectors and unsupported-value rejection.
 - [ ] Run the focused Pytest suite and confirm the new tests fail against upstream.
-- [ ] Implement transactional supported CLI/DB operations for `intake-persist`, `artifact-ensure`, `mandate-activate`, `action-prepare`, `run-bind`, `run-event`, `run-close`, `ceo-input-set`, and `terminal-intent`. Every operation returns strict JSON; do not parse human text in AgentDash.
-- [ ] Add a migration/preflight that detects existing duplicate idempotency keys before adding the uniqueness guarantee; fail with recovery instructions instead of silently choosing a task.
+- [ ] Implement all thirteen transactional supported operations. `project-board` must use one SQLite read transaction and pure projection helpers rather than the existing mutating list path. Every operation returns strict JSON; do not parse human text in AgentDash.
+- [ ] Keep the runtime bridge behind a 256-bit controller capability unavailable to PM and worker environments. AgentDash creates the plaintext token only during explicit operator bootstrap and stores it under a protected `AGENTDASH_STATE_DIR\security` path; Hermes stores only its hash plus capability id/generation, exact board UUID, protocol/allowed-operation digest, candidate source, validity window, and revocation state. First bootstrap is OS-identity authenticated and allowed only on a clean dedicated board. Rotation stages a new generation under the current token; a successful probe by the staged token atomically promotes it and revokes the prior generation. Revocation cannot remove the sole active generation. Never log or persist plaintext.
+- [ ] Treat OS isolation as the containment boundary. In production, run the AgentDash control plane and bridge under a dedicated Windows service SID/account (or dedicated POSIX uid) that alone, with SYSTEM/root, owns the protected token state and dedicated stable-board directory. Run the PM/model process and every CodeG worker under distinct restricted identities or whole-process sandboxes. Same-user local development is allowed only with production dispatch hard-disabled. Prove PM/workers cannot read controller state, read/write the database, invoke admin bootstrap, execute as the controller identity, or inherit controller credentials.
+- [ ] Mark controller cards with a durable authority domain. Every generic mutation path—create collision, edit, assign, claim, promote, schedule, block/unblock, complete, archive/delete, link/unlink, repair, and dispatcher paths—must reject controller-owned cards before hooks, events, or state changes. Controller functions use direct validated SQL and never ordinary lifecycle helpers.
+- [ ] Bind capabilities and every request to a stable board UUID and exact candidate source, never the mutable current-board pointer or a caller-controlled database path. Read operations use a dedicated SQLite read-only URI connection and one explicit read transaction; they must not call `connect()`, initialization, migrations, recompute, or the public list path.
+- [ ] Validate the exact AgentDash-owned task id instead of calling ordinary random-id `create_task`. `mandate-activate` must validate and persist the exact registry revision, ABA-safe `route_registry_snapshot_token`, canonical route rows/digest, qualification digest, validity window, expected source snapshot, replay binding/consumed timestamp, and command/grant/result tuple supplied by AgentDash; it must not treat intake-era evidence as current or re-read the live registry.
+- [ ] Add a fail-closed migration/preflight against an explicit controller schema version. Acquire the existing board `.dispatch.lock` byte-range protocol first, then the existing `.init.lock` protocol, in dispatcher-compatible order; controller migration variants fail on timeout/open/lock errors and never inherit either helper's skip/proceed fallback. After closing stale connections, verify integrity, back up with SQLite's backup API, detect active/archive collisions and every duplicate controller identity/digest, apply one additive `BEGIN EXCLUSIVE` migration, verify exact schema/UUID/integrity, and record it durably. Never choose a winner or auto-rewrite data; every controller operation rejects older, newer, or partial schemas with recovery instructions.
 - [ ] Prove archives retain request identity and external-controller operations never invoke Hermes's own worker dispatcher.
-- [ ] Run `python -m pytest tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_cli.py tests/plugins/test_kanban_attachments.py tests/plugins/test_kanban_worker_runs.py -q`.
-- [ ] Commit in the Hermes worktree: `git add hermes_cli tests website/docs/user-guide/features/kanban.md && git commit -m "feat: add atomic external controller bridge"`.
+- [ ] On Windows, run `& 'C:\Program Files\Git\bin\bash.exe' scripts/run_tests.sh tests/hermes_cli/test_kanban_controller.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_cli.py tests/plugins/test_kanban_attachments.py tests/plugins/test_kanban_worker_runs.py -q`; use `scripts/run_tests.sh` on POSIX. Never bypass the repository runner with direct Pytest. Register the unchanged native-Windows residual by exact node id `tests/hermes_cli/test_kanban_db.py::test_rate_limit_exit_requeues_without_counting_failure`, retain its failure evidence, and require every other selected test to pass with retries disabled; never use a broad or silent exclusion.
+- [ ] Commit in the Hermes worktree: `git add hermes_cli tests pyproject.toml website/docs/user-guide/features/kanban.md && git commit -m "feat: add atomic external controller bridge"`.
 
 ## Task 8: Add replay-safe Work Task operations to clean CodeG
 
@@ -511,6 +545,8 @@ assert_eq!(service.lookup_external(&key).await?, Lookup::Found(results[0].bindin
 
 - Create: `src/server/hermes/kanban-adapter.ts`
 - Create: `src/server/hermes/kanban-adapter.contract.test.ts`
+- Create: `src/server/hermes/controller-admin.ts`
+- Create: `src/server/hermes/controller-admin.contract.test.ts`
 - Create: `src/server/codeg/client.ts`
 - Create: `src/server/codeg/client.contract.test.ts`
 - Create: `src/server/codeg/schemas.ts`
@@ -520,21 +556,23 @@ assert_eq!(service.lookup_external(&key).await?, Lookup::Found(results[0].bindin
 - Create: `src/server/mission-control/workspaces/registry.test.ts`
 - Create: `config/mission-control-projects.json`
 
-**Interfaces:** `HermesKanbanAdapter implements HermesPort`, `CodeGClient implements CodeGPort`, `ReviewedAgentBrain implements AgentBrainPort`, and `WorkspaceRegistry.resolve(project_id, requested_root): Promise<CodeGWorkspaceBindingV1>`. Concrete adapters return strict port DTOs and never leak transport response shapes.
+**Interfaces:** `HermesKanbanAdapter implements all thirteen methods of HermesPort`, `HermesControllerAdmin` is a separate operator-only bootstrap/rotation/revocation/status component that is never injected into the PM, chat/API, or worker orchestration graph, `CodeGClient implements CodeGPort`, `ReviewedAgentBrain implements AgentBrainPort`, and `WorkspaceRegistry.resolve(project_id, requested_root): Promise<CodeGWorkspaceBindingV1>`. Concrete adapters return strict DTOs and never leak transport response shapes.
 
 ```ts
 await expect(codeg.ensureWork(commandWithDroppedResponse)).resolves.toEqual({ status: "unknown", binding: null });
 await expect(workspaces.resolve("agentdash", junctionEscape)).rejects.toThrow(/real path/i);
 ```
 
-- [ ] Write contract tests against fakes for atomic Hermes ensure/artifacts/action preparation and CodeG ensure/lookup/activity/cancel. Explicitly test timeout mapping to `unknown`, never to a retryable absence.
+- [ ] Write contract tests against fakes for every Hermes lookup, mutation, activation, and coherent board operation, including exact operation-name mapping and strict envelopes; also test CodeG ensure/lookup/activity/cancel. Explicitly test timeout mapping to `unknown`, never to a retryable absence.
 - [ ] Write path tests for symlinks/junctions, case normalization, missing/duplicate CodeG folders, stale folder ids, UNC paths, non-allowlisted roots, and workspace changes between approval and submission.
 - [ ] Run `npm run test:unit -- kanban-adapter client.contract registry recall`; confirm failure.
 - [ ] Implement the Hermes adapter through the strict JSON bridge and the existing shell-free runner. Implement the CodeG client with `server-only`, loopback URL validation, bearer auth, Origin, timeout, response caps, strict schemas, and secret-redacted errors.
+- [ ] Resolve and hash-pin the absolute `hermes-kanban-controller` launcher (`.exe` on Windows). Spawn with `shell: false`, `windowsHide: true`, a trusted cwd, bounded stdin/stdout/stderr, and a minimal explicit environment that clears Python injection and mutable Hermes board/database overrides. Send the capability only inside the structurally redacted stdin envelope.
+- [ ] Implement capability provisioning/rotation/revocation/status in the separate `HermesControllerAdmin`, callable only from an explicit offline/operator bootstrap path under the dedicated controller OS identity. It uses the separately hash-pinned admin launcher and is not reachable from `HermesKanbanAdapter`, application routes, PM dependencies, or worker orchestration. Neither the application API nor PM/worker process receives an admin operation, launcher handle, token path, database path, or impersonation right; operator status output is redacted and bootstrap/rotation evidence stores digests only.
 - [ ] Require real-path equality between validated project root and CodeG folder immediately before every mutating call. Preserve each returned identity independently.
 - [ ] Implement AgentBrain recall as read-only reviewed-page retrieval. Reject state, raw, dream, retired stores, writes, and transcript substitution.
 - [ ] Run focused unit/contract tests against disposable local services. Keep production dispatch disabled if either candidate bridge is absent or its commit differs from gate evidence; the qualification runner is likewise denied until both exact candidate bridge proofs pass.
-- [ ] Commit: `git add src/server/hermes/kanban-adapter* src/server/codeg src/server/agentbrain src/server/mission-control/workspaces config/mission-control-projects.json && git commit -m "feat: add mission control adapters"`.
+- [ ] Commit: `git add src/server/hermes/kanban-adapter* src/server/hermes/controller-admin* src/server/codeg src/server/agentbrain src/server/mission-control/workspaces config/mission-control-projects.json && git commit -m "feat: add mission control adapters"`.
 
 ## Task 10: Build the route inventory, evaluator, and production registry
 
@@ -553,7 +591,7 @@ await expect(workspaces.resolve("agentdash", junctionEscape)).rejects.toThrow(/r
 - Create: `src/server/mission-control/routes/qualification-runner.test.ts`
 - Create: `docs/operations/route-qualification.md`
 
-**Interfaces:** `QualificationEnvelopeV1` binds operator session, exact route tuple, task class, fixture set, disposable board/workspace, ceilings, allowed operations, issued/expiry times, and nonce. `QualificationRunner.run(envelope)` is the sole pre-promotion model path and rejects calls originating from chat/API. `RouteRegistry.requireLevel5` consumes immutable evidence only.
+**Interfaces:** `QualificationEnvelopeV1` binds operator session, exact route tuple, task class, fixture set, disposable board/workspace, ceilings, allowed operations, issued/expiry times, and nonce. `QualificationRunner.run(envelope)` is the sole pre-promotion model path and rejects calls originating from chat/API. `RouteRegistry.qualifyActivation` performs one coherent read over the controller-supplied sealed route requirements and returns one registry revision, one durable ABA-safe `route_registry_snapshot_token`, and canonical current rows—or `conflict`/`unavailable`; `RouteRegistry.requireLevel5` consumes immutable evidence only.
 
 ```ts
 expect(await registry.status(level4Route, "bounded_coding")).toBe("canary_only");
@@ -577,6 +615,7 @@ disabled: ollama-cloud/hy3:cloud
 
 - [ ] Seed exactly those 21 entries. Candidate roles are hypotheses, templates cannot qualify without a named outer harness, and the disabled item cannot run a canary.
 - [ ] Write failing tests for exact tuple identity: outer harness + provider + exact model + agent type + mode/config digest. A provider/model pair alone must not qualify.
+- [ ] Write failing activation-qualification tests for canonical distinct requirements, task-class/proof binding, trusted `at`, revoked/expired/replaced proof, torn-read conflict, `R → R+1 → R`, restart/revision reuse with a new snapshot token, and no Hermes/nonce effect on conflict. Persist the snapshot token durably and issue a new token for every registry mutation and store generation. Once revision-R qualification is materialized, later registry changes do not rewrite activation history; the fresh `requireLevel5` check before each new action blocks stale dispatch.
 - [ ] Write failing policy tests for the ten task classes, level-4 canary-only status, level-5 production status, sample/fixture minimums, Wilson bounds, 100% hard safety tests, cost/runtime ceilings, provenance, 30-day expiry, config drift, and critical-failure revocation.
 - [ ] Use at least 20 scored runs across five fixture shapes and 95% Wilson lower bound ≥0.70 for standard classes; use 30 and ≥0.80 for `hard_engineering` and `independent_review`.
 - [ ] Run `npm run test:unit -- inventory evaluator registry`; confirm failure before implementing evidence loading or eligibility.
