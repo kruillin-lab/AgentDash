@@ -7,4 +7,5 @@ export * from "./outcomes";
 export * from "./finalization";
 export * from "./receipts";
 export * from "./proposals";
+export * from "./intake";
 export * from "./ports";

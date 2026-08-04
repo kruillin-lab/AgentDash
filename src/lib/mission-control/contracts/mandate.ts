@@ -2,22 +2,41 @@ import { z } from "zod";
 import { ActionNodeIdSchema, ActionOutcomeSchema, ActionRoleSchema, AuthorityIdSchema, BudgetV1Schema, DigestSchema, ExecutorKindSchema, MandateIdSchema, ReconciliationDeadlinesV1Schema, RequestIdSchema, RouteIdSchema, RouteProofIdSchema, TaskIdSchema, TimestampSchema, WorkspaceScopeV1Schema, canonicalDigest } from "./common";
 import { MutationManifestInternalSchema, MutationScopeInternalSchema, validateMutationEnvelope } from "./mutation";
 import { TaskSpecRevisionV1Schema } from "./task";
+import { ApprovalGrantV1Schema, type ApprovalGrantV1 } from "./authority";
 
 const ceoDecision = z.enum(["initial_mandate_approval", "objective_change", "acceptance_change", "business_product_decision", "route_change", "capability_change", "workspace_change", "budget_change", "new_external_action"]);
 const target = z.discriminatedUnion("kind", [z.object({ kind: z.literal("node"), node_id: ActionNodeIdSchema }).strict(), z.object({ kind: z.literal("reconciliation"), category: z.enum(["dispatch_lookup", "cancel_confirmation", "orphan_recovery", "finalization", "receipt_delivery"]), max_attempts: z.number().int().positive(), deadline_ms: z.number().int().positive() }).strict(), z.object({ kind: z.literal("ceo_input"), decision_type: ceoDecision }).strict(), z.object({ kind: z.literal("terminal"), outcome: z.enum(["succeeded", "failed", "timed_out", "budget_exhausted", "cancelled", "route_unavailable", "inconsistent"]) }).strict()]);
-const limits = z.object({ max_cost_usd: z.number().finite().nonnegative(), max_runtime_ms: z.number().int().positive(), max_output_tokens: z.number().int().nonnegative() }).strict();
 export const ActionNodeV1Schema = z.object({ node_id: ActionNodeIdSchema, action_role: ActionRoleSchema, executor_kind: ExecutorKindSchema, route_id: RouteIdSchema.nullable(), route_proof_id: RouteProofIdSchema.nullable(), route_proof_digest: DigestSchema.nullable(), remediation_scope: z.object({ finding_classes: z.array(z.string().min(1)).min(1), artifact_scope: z.array(z.string().min(1)).min(1) }).strict().nullable() }).strict().superRefine((v, c) => { const hasCompleteRoute = v.route_id !== null && v.route_proof_id !== null && v.route_proof_digest !== null; if ((v.executor_kind === "codeg_worker") !== hasCompleteRoute) c.addIssue({ code: z.ZodIssueCode.custom, message: "node route proof binding does not match executor" }); if (v.action_role === "remediate" && v.remediation_scope === null) c.addIssue({ code: z.ZodIssueCode.custom, message: "remediation needs bounded scope" }); if (v.action_role !== "remediate" && v.remediation_scope !== null) c.addIssue({ code: z.ZodIssueCode.custom, message: "non-remediation nodes cannot carry remediation scope" }); });
 export type ActionNodeV1 = z.infer<typeof ActionNodeV1Schema>;
+
+export const ActionBudgetLimitV1Schema = z.object({ max_cost_usd: z.number().finite().nonnegative(), max_runtime_ms: z.number().int().positive(), max_output_tokens: z.number().int().nonnegative(), max_provider_tokens: z.number().int().nonnegative() }).strict();
+export type ActionBudgetLimitV1 = z.infer<typeof ActionBudgetLimitV1Schema>;
 
 const mandateBase = z.object({
   schema_version: z.literal("agentdash.execution-mandate/v1"), mandate_id: MandateIdSchema, task_id: TaskIdSchema, request_id: RequestIdSchema, task_spec_revision: TaskSpecRevisionV1Schema,
   action_nodes: z.array(ActionNodeV1Schema).min(1), transition_graph: z.record(z.record(ActionOutcomeSchema, target)), visit_caps: z.record(z.number().int().positive()), edge_visit_caps: z.record(z.number().int().positive()),
   verification_step: z.object({ acceptance_digest: DigestSchema, acceptance_checks: z.array(z.string().min(1)).min(1), required_independence_tier: z.union([z.literal(1), z.literal(2)]), route_id: RouteIdSchema.nullable(), route_proof_id: RouteProofIdSchema.nullable(), route_proof_digest: DigestSchema.nullable(), deterministic_verifier_id: z.string().min(1).nullable(), independence_proof_digest: DigestSchema }).strict().superRefine((v, c) => { const routeParts = [v.route_id, v.route_proof_id, v.route_proof_digest]; const completeRoute = routeParts.every((part) => part !== null); const emptyRoute = routeParts.every((part) => part === null); if (!completeRoute && !emptyRoute) c.addIssue({ code: z.ZodIssueCode.custom, message: "verifier route binding may not be partial" }); if (completeRoute === (v.deterministic_verifier_id !== null)) c.addIssue({ code: z.ZodIssueCode.custom, message: "verification must bind exactly one verifier identity" }); }),
   finalization_step: MutationScopeInternalSchema.extend({ mutation_manifest: MutationManifestInternalSchema, expected_post_state: z.discriminatedUnion("kind", [z.object({ kind: z.literal("digest"), digest: DigestSchema }).strict(), z.object({ kind: z.literal("postcondition"), predicate: z.string().min(1), predicate_digest: DigestSchema }).strict()]), drift_preconditions: z.object({ base_digest: DigestSchema, target_digest: DigestSchema, cas_precondition_digest: DigestSchema }).strict() }).superRefine(validateMutationEnvelope),
-  capability_scope: z.object({ allowed_tools: z.array(z.string().min(1)), allowed_side_effects: z.array(z.string()), allowed_data_classes: z.array(z.string().min(1)), prohibited_actions: z.array(z.string().min(1)) }).strict(), workspace_scope: WorkspaceScopeV1Schema, aggregate_budget: BudgetV1Schema, per_action_limits: z.record(limits),
+  capability_scope: z.object({ allowed_tools: z.array(z.string().min(1)), allowed_side_effects: z.array(z.string()), allowed_data_classes: z.array(z.string().min(1)), prohibited_actions: z.array(z.string().min(1)) }).strict(), workspace_scope: WorkspaceScopeV1Schema, aggregate_budget: BudgetV1Schema, per_action_limits: z.record(ActionBudgetLimitV1Schema), budget_policy_digest: DigestSchema,
   budget_proof: z.object({ worst_case_path_node_ids: z.array(ActionNodeIdSchema).min(1), worst_case_path: BudgetV1Schema, task_reserves: z.object({ verification: BudgetV1Schema, finalization: BudgetV1Schema, cancellation: BudgetV1Schema, reconciliation: BudgetV1Schema }).strict(), reserves_carried_once: z.literal(true) }).strict(),
-  reconciliation_limits: ReconciliationDeadlinesV1Schema, expiry: TimestampSchema, authority_source: z.object({ kind: z.enum(["approval_grant", "auto_policy_receipt"]), authority_id: AuthorityIdSchema }).strict(),
+  reconciliation_limits: ReconciliationDeadlinesV1Schema, expiry: TimestampSchema, authority_source: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("approval_precommit"), authority_id: AuthorityIdSchema, binding: z.literal("precommitted_at_intake") }).strict(),
+    z.object({ kind: z.literal("auto_policy_receipt"), authority_id: AuthorityIdSchema, binding: z.literal("materialized_at_intake") }).strict(),
+  ]),
 }).strict();
+
+export const ExecutionMandateTemplateV1Schema = mandateBase.omit({
+  schema_version: true,
+  mandate_id: true,
+  task_id: true,
+  request_id: true,
+  task_spec_revision: true,
+  budget_policy_digest: true,
+  budget_proof: true,
+  expiry: true,
+  authority_source: true,
+});
+export type ExecutionMandateTemplateV1 = z.infer<typeof ExecutionMandateTemplateV1Schema>;
 
 export const ExecutionMandateV1Schema = mandateBase.superRefine((v, c) => {
   if (v.verification_step.acceptance_digest !== canonicalDigest(v.verification_step.acceptance_checks)) c.addIssue({ code: z.ZodIssueCode.custom, path: ["verification_step", "acceptance_digest"], message: "verification acceptance digest must match exact checks" });
@@ -48,3 +67,27 @@ export const ExecutionMandateV1Schema = mandateBase.superRefine((v, c) => {
   for (const nodeId of v.budget_proof.worst_case_path_node_ids) if (!nodes.has(nodeId)) c.addIssue({ code: z.ZodIssueCode.custom, message: "budget proof names an unknown action node" });
 });
 export type ExecutionMandateV1 = z.infer<typeof ExecutionMandateV1Schema>;
+
+export function approvalGrantFulfillsMandate(rawMandate: unknown, rawGrant: unknown): boolean {
+  const mandate = ExecutionMandateV1Schema.safeParse(rawMandate);
+  const grant = ApprovalGrantV1Schema.safeParse(rawGrant);
+  if (!mandate.success || !grant.success || mandate.data.authority_source.kind !== "approval_precommit") return false;
+  const expectedRouteIds = mandate.data.action_nodes.map((node) => node.route_id).filter((routeId): routeId is NonNullable<typeof routeId> => routeId !== null);
+  const value: ApprovalGrantV1 = grant.data;
+  return value.authority_id === mandate.data.authority_source.authority_id
+    && value.task_id === mandate.data.task_id
+    && value.task_spec_revision === mandate.data.task_spec_revision.plan_revision
+    && value.task_spec_digest === mandate.data.task_spec_revision.task_spec_digest
+    && value.mandate_id === mandate.data.mandate_id
+    && value.objective_digest === mandate.data.task_spec_revision.objective_digest
+    && value.acceptance_digest === mandate.data.task_spec_revision.acceptance_digest
+    && value.mandate_digest === canonicalDigest(mandate.data)
+    && canonicalDigest(value.ordered_route_ids) === canonicalDigest(expectedRouteIds)
+    && canonicalDigest(value.capability_scope) === canonicalDigest(mandate.data.capability_scope)
+    && canonicalDigest(value.workspace_scope) === canonicalDigest(mandate.data.workspace_scope)
+    && canonicalDigest(value.aggregate_budget) === canonicalDigest(mandate.data.aggregate_budget)
+    && value.finalization_predicate.mutation_type === mandate.data.finalization_step.mutation_type
+    && value.finalization_predicate.mutation_manifest_digest === mandate.data.finalization_step.mutation_manifest.manifest_digest
+    && value.finalization_predicate.max_external_mutation === (mandate.data.finalization_step.mutation_type === "approved_merge")
+    && Date.parse(value.expires_at) <= Date.parse(mandate.data.expiry);
+}

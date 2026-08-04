@@ -2,6 +2,8 @@ import type {
   ActionCommandV1,
   ActivationDecisionV1,
   ActivateMandateInput,
+  ActivateMandateResult,
+  ActivationSnapshotV1,
   AdapterResultEnvelopeV1,
   AppendRunEventInput,
   BindWorkerSessionInput,
@@ -23,6 +25,8 @@ import type {
   MissionControlBoardV1,
   PersistIntakeInput,
   PersistIntakeResult,
+  LookupIntakeResult,
+  LookupActivationByCommandResult,
   PrepareActionInput,
   PreparedActionResult,
   ProjectId,
@@ -40,6 +44,8 @@ import type {
 export type {
   ActivationDecisionV1,
   ActivateMandateInput,
+  ActivateMandateResult,
+  ActivationSnapshotV1,
   AppendRunEventInput,
   BindWorkerSessionInput,
   CloseActionInput,
@@ -55,6 +61,8 @@ export type {
   MissionControlBoardV1,
   PersistIntakeInput,
   PersistIntakeResult,
+  LookupIntakeResult,
+  LookupActivationByCommandResult,
   PrepareActionInput,
   PreparedActionResult,
   ReviewedRecallV1,
@@ -63,9 +71,12 @@ export type {
 } from "@/lib/mission-control/contracts";
 
 export interface HermesPort {
+  lookupIntake(request_id: string): Promise<LookupIntakeResult>;
   persistIntake(input: PersistIntakeInput): Promise<PersistIntakeResult>;
   ensureArtifact(input: EnsureArtifactInput): Promise<EnsureArtifactResult>;
-  activateMandate(input: ActivateMandateInput): Promise<void>;
+  getActivationSnapshot(task_id: string): Promise<ActivationSnapshotV1>;
+  lookupActivationByCommand(command_id: string): Promise<LookupActivationByCommandResult>;
+  activateMandate(input: ActivateMandateInput): Promise<ActivateMandateResult>;
   prepareAction(input: PrepareActionInput): Promise<PreparedActionResult>;
   bindWorkerSession(input: BindWorkerSessionInput): Promise<void>;
   appendRunEvent(input: AppendRunEventInput): Promise<void>;

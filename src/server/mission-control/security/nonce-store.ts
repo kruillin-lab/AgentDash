@@ -12,12 +12,21 @@ const nonceInputSchema = z
     session_id: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     nonce: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
     expires_at: z.number().int().positive(),
+    binding_digest: z.string().regex(/^[a-f0-9]{64}$/),
   })
   .strict();
-export type NonceConsumption = "consumed" | "replayed" | "expired";
+const nonceRecordSchema = z.object({
+  schema_version: z.literal("nonce_consumption_v2"),
+  binding_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  expires_at: z.number().int().positive(),
+  consumed_at: z.number().int().nonnegative(),
+}).strict();
+export type NonceConsumption =
+  | { status: "consumed" | "replayed_same"; consumed_at: number }
+  | { status: "replayed_conflict" | "expired" };
 
 export interface NonceStore {
-  consume(input: { session_id: string; nonce: string; expires_at: number }): Promise<NonceConsumption>;
+  consume(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceConsumption>;
 }
 
 export interface CreateNonceStoreOptions {
@@ -88,7 +97,12 @@ function noncePath(location: NonceLocation, sessionId: string, nonce: string): s
   return path.join(location.canonical_security, `nonce-${identifier}.json`);
 }
 
-async function existingNonceResult(destination: string, location: NonceLocation): Promise<NonceConsumption> {
+async function existingNonceResult(
+  destination: string,
+  location: NonceLocation,
+  input: z.infer<typeof nonceInputSchema>,
+  currentTime: number,
+): Promise<NonceConsumption> {
   try {
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
     await recheckNonceLocation(location);
@@ -96,18 +110,27 @@ async function existingNonceResult(destination: string, location: NonceLocation)
     const handle = await open(destination, fsConstants.O_RDONLY | noFollow);
     try {
       const [handleStats, canonicalDestination] = await Promise.all([handle.stat(), realpath(destination)]);
-      if (!handleStats.isFile() || comparablePath(path.dirname(canonicalDestination)) !== comparablePath(location.canonical_security)) {
-        return "expired";
+      if (!handleStats.isFile() || handleStats.size <= 0 || handleStats.size > 2_048 || comparablePath(path.dirname(canonicalDestination)) !== comparablePath(location.canonical_security)) {
+        return { status: "expired" };
       }
       const pathStats = await stat(canonicalDestination);
-      if (handleStats.dev !== pathStats.dev || handleStats.ino !== pathStats.ino) return "expired";
+      if (handleStats.dev !== pathStats.dev || handleStats.ino !== pathStats.ino) return { status: "expired" };
+      const bytes = await handle.readFile({ encoding: "utf8" });
+      const record = nonceRecordSchema.safeParse(JSON.parse(bytes));
+      if (!record.success
+        || record.data.expires_at <= currentTime
+        || record.data.expires_at !== input.expires_at
+        || record.data.consumed_at > currentTime
+        || record.data.consumed_at >= record.data.expires_at) return { status: "expired" };
       await recheckNonceLocation(location);
-      return "replayed";
+      return record.data.binding_digest === input.binding_digest
+        ? { status: "replayed_same", consumed_at: record.data.consumed_at }
+        : { status: "replayed_conflict" };
     } finally {
       await handle.close();
     }
   } catch {
-    return "expired";
+    return { status: "expired" };
   }
 }
 
@@ -123,7 +146,7 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
         parsed.data.expires_at - currentTime > MAX_COMMAND_SESSION_TTL_MS ||
         !state_directory
       ) {
-        return "expired";
+        return { status: "expired" };
       }
 
       try {
@@ -133,11 +156,11 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
         const noFollow = fsConstants.O_NOFOLLOW ?? 0;
         const handle = await open(destination, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow, 0o600);
         try {
-          if (!(await handle.stat()).isFile()) return "expired";
-          await handle.writeFile(`${JSON.stringify({ schema_version: "nonce_consumption_v1", expires_at: parsed.data.expires_at })}\n`, "utf8");
+          if (!(await handle.stat()).isFile()) return { status: "expired" };
+          await handle.writeFile(`${JSON.stringify({ schema_version: "nonce_consumption_v2", binding_digest: parsed.data.binding_digest, expires_at: parsed.data.expires_at, consumed_at: currentTime })}\n`, "utf8");
           await handle.sync();
           await recheckNonceLocation(location);
-          return "consumed";
+          return { status: "consumed", consumed_at: currentTime };
         } finally {
           await handle.close();
         }
@@ -145,12 +168,12 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
           try {
             const location = await prepareNonceLocation(state_directory);
-            return await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), location);
+            return await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), location, parsed.data, currentTime);
           } catch {
-            return "expired";
+            return { status: "expired" };
           }
         }
-        return "expired";
+        return { status: "expired" };
       }
     },
   };

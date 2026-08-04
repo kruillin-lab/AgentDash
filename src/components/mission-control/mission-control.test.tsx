@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from "react";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import {
@@ -17,7 +17,10 @@ beforeAll(async () => {
   ({ MissionControlShell } = await import("./MissionControlShell"));
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 const digest = "b".repeat(64);
 const card = (task_id: string, title: string, detail: string, attempt: string | null = null) => MissionControlCardPayloadV1Schema.parse({
@@ -40,7 +43,7 @@ const board: MissionControlServedBoardV1 = MissionControlServedBoardV1Schema.par
 });
 
 describe("MissionControlShell", () => {
-  test("shows the five read-only projections and disabled conversation controls", () => {
+  test("shows the five projections and an enabled proposal-only conversation", () => {
     render(<MissionControlShell board={board} />);
 
     expect(screen.getByRole("region", { name: "Ready" }).textContent).toContain("Prepare release");
@@ -48,8 +51,8 @@ describe("MissionControlShell", () => {
     expect(screen.getByRole("region", { name: "Needs you" }).textContent).toContain("Choose target environment");
     expect(screen.getByRole("region", { name: "Stopped" }).textContent).toContain("Repair bridge");
     expect(screen.getByRole("region", { name: "Completed" }).textContent).toContain("Archive report");
-    expect(screen.getByRole("textbox", { name: "PM conversation" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Send disabled in read-only mission control" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("textbox", { name: "PM conversation" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
   });
 
   test("updates the labelled inspector from keyboard card selection", async () => {
@@ -97,5 +100,87 @@ describe("MissionControlShell", () => {
 
     expect(screen.getByText("Hermes board bridge is not configured.")).not.toBeNull();
     expect(screen.queryByRole("button", { name: /Prepare release/i })).toBeNull();
+  });
+
+  test("freezes one request envelope across failure and Retry, then clears it only after an acknowledgement", async () => {
+    const user = userEvent.setup();
+    const requestId = "123e4567-e89b-42d3-a456-426614174000";
+    const randomUUID = vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(requestId);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("network unavailable"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        schema_version: "agentdash.intake-ack/v1",
+        request_id: requestId,
+        pm: {
+          text: "What outcome should define success?",
+          session_ref: "pm-session-1",
+          proposal: {
+            schema_version: "agentdash.management-proposal/v1",
+            proposal_id: "proposal-1",
+            task_id: null,
+            intent: "conversation_only",
+            created_at: "2026-08-04T10:00:00.000Z",
+          },
+        },
+        result: { kind: "conversation_only" },
+        board_refresh: false,
+        select_task_id: null,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    render(<MissionControlShell board={board} />);
+
+    const composer = screen.getByRole("textbox", { name: "PM conversation" });
+    await user.type(composer, "Plan the release.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("button", { name: "Retry" })).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("What outcome should define success?");
+
+    const sentBodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)) as unknown);
+    expect(sentBodies).toEqual([
+      { request_id: requestId, message: "Plan the release." },
+      { request_id: requestId, message: "Plan the release." },
+    ]);
+    expect(randomUUID).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect((composer as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  test("refreshes the board once and selects only the exact acknowledged card", async () => {
+    const user = userEvent.setup();
+    const requestId = "123e4567-e89b-42d3-a456-426614174000";
+    const taskId = `task-${"a".repeat(64)}`;
+    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(requestId);
+    const refreshed = MissionControlServedBoardV1Schema.parse({ ...board, lanes: { ...board.lanes, needs_you: [...board.lanes.needs_you, card(taskId, "New mandate", "Approval required")] } });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema_version: "agentdash.intake-ack/v1", request_id: requestId, pm: { text: "A bounded proposal is ready.", session_ref: "pm-session-card", proposal: { schema_version: "agentdash.management-proposal/v1", proposal_id: "proposal-card", task_id: null, intent: "create_task", created_at: "2026-08-04T10:00:00.000Z" } }, result: { kind: "card_created", task_id: taskId, readiness: { kind: "approval_required", reasons: [], decision_type: "initial_mandate_approval" } }, board_refresh: true, select_task_id: taskId }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ board: refreshed, unavailable_reason: null }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    render(<MissionControlShell board={board} />);
+
+    await user.type(screen.getByRole("textbox", { name: "PM conversation" }), "Create a release mandate.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    const selectedCard = await screen.findByRole("button", { name: /New mandate/i });
+    await waitFor(() => expect(selectedCard.getAttribute("aria-pressed")).toBe("true"));
+    expect(screen.getByRole("region", { name: "Selected attempt" }).textContent).toContain("New mandate");
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(["/api/mission-control/chat", "/api/mission-control/board"]);
+  });
+
+  test("does not replay acknowledged intake or invent a card when board refresh fails", async () => {
+    const user = userEvent.setup();
+    const requestId = "123e4567-e89b-42d3-a456-426614174000";
+    const taskId = `task-${"a".repeat(64)}`;
+    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(requestId);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schema_version: "agentdash.intake-ack/v1", request_id: requestId, pm: { text: "A bounded proposal is ready.", session_ref: "pm-session-card", proposal: { schema_version: "agentdash.management-proposal/v1", proposal_id: "proposal-card", task_id: null, intent: "create_task", created_at: "2026-08-04T10:00:00.000Z" } }, result: { kind: "card_created", task_id: taskId, readiness: { kind: "approval_required", reasons: [], decision_type: "initial_mandate_approval" } }, board_refresh: true, select_task_id: taskId }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockRejectedValueOnce(new Error("board unavailable"));
+    render(<MissionControlShell board={board} />);
+
+    await user.type(screen.getByRole("textbox", { name: "PM conversation" }), "Create a release mandate.");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("A bounded proposal is ready.");
+
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /New mandate/i })).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
