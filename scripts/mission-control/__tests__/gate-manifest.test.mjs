@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -223,6 +223,24 @@ test("unsafe proof content never reaches serialized output", () => {
   assert.equal(snapshot.proofs.some((proof) => proof.gate_id === "codeg_replay_safety"), false);
 });
 
+// Mutation caught: copying raw reasons after an unsafe proof has been rejected.
+test("rejected proof reasons never reach serialized output", () => {
+  const reasonFragments = ["roundtwoquartz", "roundtwovelvet", "roundtwoharbor"];
+  const reasonValue = reasonFragments.join("-");
+  const proofs = fixtureProofs();
+  proofs[2].status = "no_go";
+  proofs[2].reasons = [`${["Authori", "zation"].join("")}: ${["Bear", "er"].join("")} ${reasonValue}`];
+  refreshDigest(proofs[2]);
+
+  const snapshot = buildSnapshot(proofs);
+  const serialized = JSON.stringify(snapshot);
+
+  assert.equal(serialized.includes(reasonValue), false);
+  for (const fragment of reasonFragments) assert.equal(serialized.includes(fragment), false);
+  assert.equal(snapshot.proofs.some((proof) => proof.gate_id === "codeg_replay_safety"), false);
+  assert.match(snapshot.dispatch.reasons.join("\n"), /rejected|unsafe|credential/i);
+});
+
 // Mutation caught: a redaction marker hiding a second unsafe value from validation.
 test("partially redacted evidence cannot bypass unsafe-proof omission", () => {
   const proofs = fixtureProofs();
@@ -349,7 +367,7 @@ test("evidence writer rejects a state root inside the repository", async () => {
   const snapshot = buildSnapshot(fixtureProofs());
 
   await assert.rejects(
-    gates.writeUnsignedGateSnapshot(snapshot, ROOT, { repoRoot: ROOT }),
+    gates.writeUnsignedGateSnapshot(snapshot, ROOT),
     /inside.*repository|repository.*inside/i,
   );
 });
@@ -366,7 +384,7 @@ test("evidence writer rejects a reparse path that escapes the canonical state ro
     await symlink(outside, path.join(stateRoot, "evidence"), process.platform === "win32" ? "junction" : "dir");
 
     await assert.rejects(
-      gates.writeUnsignedGateSnapshot(buildSnapshot(fixtureProofs()), stateRoot, { repoRoot: ROOT }),
+      gates.writeUnsignedGateSnapshot(buildSnapshot(fixtureProofs()), stateRoot),
       /escape|reparse|junction|symlink|contain/i,
     );
   } finally {
@@ -380,7 +398,7 @@ test("evidence writer rejects a destination-file symlink even when bytes match",
   try {
     const stateRoot = path.join(temporaryRoot, "state");
     const snapshot = buildSnapshot(fixtureProofs());
-    const destination = await gates.writeUnsignedGateSnapshot(snapshot, stateRoot, { repoRoot: ROOT });
+    const destination = await gates.writeUnsignedGateSnapshot(snapshot, stateRoot);
     const encoded = await readFile(destination);
     const outsideFile = path.join(temporaryRoot, "outside-snapshot.json");
     await writeFile(outsideFile, encoded);
@@ -388,7 +406,7 @@ test("evidence writer rejects a destination-file symlink even when bytes match",
     await symlink(outsideFile, destination, "file");
 
     await assert.rejects(
-      gates.writeUnsignedGateSnapshot(snapshot, stateRoot, { repoRoot: ROOT }),
+      gates.writeUnsignedGateSnapshot(snapshot, stateRoot),
       /symlink|reparse|regular file|contain/i,
     );
   } finally {
@@ -500,5 +518,32 @@ test("portable CLI exits nonzero, reports NO-GO, and writes only an unsigned sna
     assert.equal(snapshot.schema_version, "unsigned_gate_snapshot_v1");
   } finally {
     await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+// Mutation caught: deriving repository containment from the process working directory.
+test("CLI uses the module repository boundary when launched from an external cwd", async () => {
+  const externalCwd = await mkdtemp(path.join(tmpdir(), "agentdash-external-cwd-"));
+  const repositoryState = path.join(ROOT, `.task1-state-${process.pid}-${Date.now()}`);
+  try {
+    const result = spawnSync(process.execPath, [CLI_PATH], {
+      cwd: externalCwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        AGENTDASH_STATE_DIR: repositoryState,
+        AGENTDASH_LISTENER_ADDRESS: "127.0.0.1",
+        HERMES_BINARY_PATH: path.join(externalCwd, "missing-hermes.exe"),
+        CODEG_BINARY_PATH: path.join(externalCwd, "missing-codeg.exe"),
+      },
+      shell: false,
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(`${result.stdout}\n${result.stderr}`, /inside.*repository|repository.*inside/i);
+    await assert.rejects(access(repositoryState), (error) => error?.code === "ENOENT");
+  } finally {
+    await rm(externalCwd, { recursive: true, force: true });
+    await rm(repositoryState, { recursive: true, force: true });
   }
 });

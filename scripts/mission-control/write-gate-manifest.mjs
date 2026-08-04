@@ -141,8 +141,10 @@ function analyzeProof(rawProof, nowMs, expectedProvenanceByGate) {
     problems.push(...semanticProblems(gate, rawProof.facts));
   }
   if (rawProof.status === "no_go") {
-    if (Array.isArray(rawProof.reasons) && rawProof.reasons.length > 0) {
-      problems.push(...rawProof.reasons.map((reason) => `${gateId ?? "unknown gate"}: ${reason}`));
+    if (fatal) {
+      problems.push(`Rejected proof for ${gateId ?? "unknown gate"} discarded untrusted reasons.`);
+    } else if (Array.isArray(sanitizedResult.value.reasons) && sanitizedResult.value.reasons.length > 0) {
+      problems.push(...sanitizedResult.value.reasons.map((reason) => `${gateId ?? "unknown gate"}: ${reason}`));
     } else {
       problems.push(`NO-GO proof for ${gateId ?? "unknown gate"} has no reason.`);
     }
@@ -214,9 +216,9 @@ async function rejectReparsePoint(target, label) {
   }
 }
 
-async function prepareEvidenceLocation(stateDirectory, repoRoot) {
+async function prepareEvidenceLocation(stateDirectory) {
   const configuredState = path.resolve(stateDirectory);
-  const canonicalRepo = await realpath(path.resolve(repoRoot));
+  const canonicalRepo = await realpath(ROOT);
   if (isWithin(canonicalRepo, configuredState)) throw new Error("AGENTDASH_STATE_DIR cannot be inside the repository.");
   await rejectReparsePoint(configuredState, "AGENTDASH_STATE_DIR");
   await mkdir(configuredState, { recursive: true });
@@ -257,8 +259,8 @@ async function validateOpenEvidenceFile(handle, destination, location) {
   await recheckEvidenceLocation(location);
 }
 
-export async function writeUnsignedGateSnapshot(snapshot, stateDirectory, { repoRoot = ROOT } = {}) {
-  const location = await prepareEvidenceLocation(stateDirectory, repoRoot);
+export async function writeUnsignedGateSnapshot(snapshot, stateDirectory) {
+  const location = await prepareEvidenceLocation(stateDirectory);
   const encoded = `${canonicalJson(snapshot)}\n`;
   const destination = path.join(location.canonicalEvidence, `unsigned-gate-snapshot-${sha256(encoded)}.json`);
   await recheckEvidenceLocation(location);
@@ -328,7 +330,7 @@ export async function runProbe({ env = process.env, cwd = process.cwd(), now } =
   if (!env.AGENTDASH_STATE_DIR) {
     return { snapshot, evidencePath: null, error: "AGENTDASH_STATE_DIR is required; no evidence was written." };
   }
-  const evidencePath = await writeUnsignedGateSnapshot(snapshot, env.AGENTDASH_STATE_DIR, { repoRoot: cwd });
+  const evidencePath = await writeUnsignedGateSnapshot(snapshot, env.AGENTDASH_STATE_DIR);
   return { snapshot, evidencePath, error: null };
 }
 
