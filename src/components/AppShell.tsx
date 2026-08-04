@@ -14,7 +14,8 @@ type AgentNav = {
   presence?: boolean
 }
 
-const NAV_OVERVIEW: AgentNav = { id: "overview", href: "/", label: "Overview", description: "Mission dashboard" }
+const NAV_MISSION_CONTROL: AgentNav = { id: "mission-control", href: "/", label: "Mission Control", description: "CEO work board" }
+const NAV_OVERVIEW: AgentNav = { id: "overview", href: "/overview", label: "Overview", description: "System dashboard" }
 const NAV_AGENTS: AgentNav = { id: "agents", href: "/agents", label: "Agent Fleet", description: "All agents" }
 
 const PRIMARY_AGENTS: AgentNav[] = [
@@ -94,6 +95,7 @@ function Sidebar({ pathname, health }: { pathname: string; health: { opencode?: 
       </Link>
 
       <SectionTitle>Workspace</SectionTitle>
+      <NavItem agent={NAV_MISSION_CONTROL} active={isActive(NAV_MISSION_CONTROL.href)} />
       <NavItem agent={NAV_OVERVIEW} active={isActive(NAV_OVERVIEW.href)} />
       <NavItem agent={NAV_AGENTS} active={isActive(NAV_AGENTS.href)} />
 
@@ -234,7 +236,8 @@ function Logo({ small }: { small?: boolean }) {
 }
 
 function pageTitle(pathname: string): { eyebrow: string; title: string } {
-  if (pathname === "/") return { eyebrow: "Mission", title: "Overview" }
+  if (pathname === "/") return { eyebrow: "Mission", title: "CEO Mission Control" }
+  if (pathname === "/overview") return { eyebrow: "Mission", title: "Overview" }
   if (pathname.startsWith("/opencode")) return { eyebrow: "Primary agent", title: "OpenCode" }
   if (pathname.startsWith("/hermes")) return { eyebrow: "Native agent", title: "Hermes" }
   if (pathname.startsWith("/agents")) return { eyebrow: "Extensible", title: "Agent Fleet" }
