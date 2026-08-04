@@ -228,6 +228,36 @@ describe("POST /api/mission-control/chat", () => {
     expect(response.status).toBe(400);
   });
 
+  // Production break caught: two distinct exact refs for one status subject could reach
+  // inference and later render contradictory server-owned statements.
+  test("rejects conflicting current status subjects before inference or handoff", async () => {
+    const handoff = vi.fn();
+    const pm = { turn: vi.fn().mockResolvedValue(executableEnvelope) } as HermesPM;
+    vi.mocked(getPMChatDependencies).mockReturnValue({ pm, proposalHandoff: handoff });
+    const response = await POST(request({
+      ...input,
+      status_facts: [
+        {
+          status_id: "release-complete",
+          subject: "release",
+          state: "complete",
+          verified_at: "2026-08-04T10:00:00.000Z",
+        },
+        {
+          status_id: "release-blocked",
+          subject: "release",
+          state: "blocked",
+          verified_at: "2026-08-04T10:00:00.000Z",
+        },
+      ],
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: { code: "invalid_request", message: "Invalid chat request." } });
+    expect(pm.turn).not.toHaveBeenCalled();
+    expect(handoff).not.toHaveBeenCalled();
+  });
+
   // Production break caught: conversation-only turns could accidentally invoke the future card-creation seam.
   test("returns conversation_only without handing off a proposal", async () => {
     const handoff = vi.fn();

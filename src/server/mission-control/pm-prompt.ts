@@ -63,6 +63,10 @@ export const PMTurnInputV1Schema = z.object({
       context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} references must be unique` });
     }
   }
+  const statusSubjects = input.status_facts.map((fact) => fact.subject);
+  if (new Set(statusSubjects).size !== statusSubjects.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["status_facts"], message: "status fact subjects must be unique" });
+  }
 });
 export type PMTurnInputV1 = z.input<typeof PMTurnInputV1Schema>;
 export type ParsedPMTurnInputV1 = z.output<typeof PMTurnInputV1Schema>;

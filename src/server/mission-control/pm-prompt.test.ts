@@ -57,6 +57,31 @@ describe("PMTurnInputV1Schema", () => {
     expect(PMTurnInputV1Schema.safeParse({ ...input, ...duplicate }).success).toBe(false);
   });
 
+  // Production break caught: distinct IDs could describe one authoritative subject more
+  // than once, including contradictory states that produce mutually exclusive claims.
+  test.each([
+    ["same", "complete"],
+    ["conflicting", "blocked"],
+  ])("rejects distinct status IDs with %s states for one authoritative subject", (_label, secondState) => {
+    expect(PMTurnInputV1Schema.safeParse({
+      ...input,
+      status_facts: [
+        { ...input.status_facts[0], status_id: "release-complete", state: "complete" },
+        { ...input.status_facts[0], status_id: "release-second", state: secondState },
+      ],
+    }).success).toBe(false);
+  });
+
+  test("accepts one current status fact for each distinct subject", () => {
+    expect(PMTurnInputV1Schema.safeParse({
+      ...input,
+      status_facts: [
+        input.status_facts[0],
+        { ...input.status_facts[0], status_id: "verification", subject: "verification", state: "ready_for_review" },
+      ],
+    }).success).toBe(true);
+  });
+
   test("rejects recall IDs that could inject rendered prose", () => {
     expect(PMTurnInputV1Schema.safeParse({
       ...input,

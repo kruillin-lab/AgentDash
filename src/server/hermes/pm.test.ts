@@ -256,6 +256,37 @@ describe("HermesPM", () => {
     });
   });
 
+  // Production break caught: contradictory facts for one current status subject could
+  // cross the proof boundary and let exact refs produce mutually exclusive claims.
+  test("rejects conflicting current status subjects before trusted launch", async () => {
+    const launchPort = fakeHermes({
+      response_code: "proposal_drafted",
+      conversation_atoms: [],
+      proposal: proposal("create_task"),
+    });
+    const pm = createHermesPM(pmOptions(launchPort));
+    const conflictingInput: PMTurnInputV1 = {
+      ...statusTurnInput,
+      status_facts: [
+        {
+          status_id: "release-complete",
+          subject: "release",
+          state: "complete",
+          verified_at: "2026-08-04T09:59:00.000Z",
+        },
+        {
+          status_id: "release-blocked",
+          subject: "release",
+          state: "blocked",
+          verified_at: "2026-08-04T09:59:00.000Z",
+        },
+      ],
+    };
+
+    await expect(pm.turn(conflictingInput)).rejects.toMatchObject({ name: "ZodError" });
+    expect(launchPort.launch).not.toHaveBeenCalled();
+  });
+
   test("renders fixed server-owned conversation text from a structured response code", async () => {
     const run = fakeHermes({
       response_code: "clarification_required",
