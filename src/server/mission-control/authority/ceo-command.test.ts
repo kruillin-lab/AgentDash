@@ -154,6 +154,7 @@ class MemoryNonces implements NonceStore {
 }
 
 class RouteRegistryFake {
+  #routeStoreGeneration = 1;
   qualificationCalls = 0;
   routeRegistryRevision = 1;
   routeRegistrySnapshotToken = canonicalDigest({ registry: "test", generation: 1 });
@@ -166,12 +167,18 @@ class RouteRegistryFake {
     this.currentRoutes = snapshot.status === "pending" ? structuredClone(snapshot.readiness.route_snapshot) as ReturnType<typeof routeEvidence>[] : [];
   }
 
+  commitRouteStoreMutation(mutation: () => void): void {
+    mutation();
+    this.#routeStoreGeneration += 1;
+  }
+
   async qualifyActivation(rawInput: GetActivationQualificationInput): Promise<GetActivationQualificationResult> {
     this.qualificationCalls += 1;
     const input = GetActivationQualificationInputSchema.parse(rawInput);
     this.qualificationInputs.push(structuredClone(input));
     if (this.qualificationStatus === "conflict") return { status: "conflict" };
     if (this.qualificationStatus === "unavailable") return { status: "unavailable", reason: "registry unavailable" };
+    const storeGeneration = this.#routeStoreGeneration;
     const revision = this.routeRegistryRevision;
     const snapshotToken = this.routeRegistrySnapshotToken;
     const routesById = new Map(this.currentRoutes.map((route) => [route.route_id, route]));
@@ -180,7 +187,7 @@ class RouteRegistryFake {
       return route ? [structuredClone(route)] : [];
     }));
     this.afterRowsRead?.();
-    if (this.routeRegistryRevision !== revision || this.routeRegistrySnapshotToken !== snapshotToken || routesById.size !== this.currentRoutes.length || routes.length !== input.requirements.length) return { status: "conflict" };
+    if (this.#routeStoreGeneration !== storeGeneration || this.routeRegistryRevision !== revision || this.routeRegistrySnapshotToken !== snapshotToken || routesById.size !== this.currentRoutes.length || routes.length !== input.requirements.length) return { status: "conflict" };
     return { status: "qualified", route_registry_revision: revision, route_registry_snapshot_token: snapshotToken, routes };
   }
 }
@@ -391,6 +398,31 @@ describe("CEO command service", () => {
 
     await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
     expect(routes.qualificationCalls).toBe(1);
+    expect(nonces.calls).toBe(0);
+    expect(hermes.activationCalls).toBe(0);
+    expect(hermes.activationWrites).toBe(0);
+  });
+
+  test("rejects a revoked route hidden by restored revision and public snapshot token", async () => {
+    const { snapshot, request } = routedFixture();
+    const hermes = new HermesFake(snapshot);
+    const routes = new RouteRegistryFake(snapshot);
+    const nonces = new MemoryNonces();
+    const originalRevision = routes.routeRegistryRevision;
+    const originalToken = routes.routeRegistrySnapshotToken;
+    routes.afterRowsRead = () => routes.commitRouteStoreMutation(() => {
+      routes.routeRegistryRevision = originalRevision + 1;
+      routes.routeRegistrySnapshotToken = canonicalDigest({ registry: "test", generation: 2 });
+      routes.currentRoutes[0].status = "revoked";
+      routes.currentRoutes[0].revocation_reason = "revoked during qualification";
+      routes.routeRegistryRevision = originalRevision;
+      routes.routeRegistrySnapshotToken = originalToken;
+    });
+
+    await expect(commandService(hermes, nonces, now, routes).approveInitial(request, session)).rejects.toMatchObject({ code: "activation_conflict" });
+    expect(routes.routeRegistryRevision).toBe(originalRevision);
+    expect(routes.routeRegistrySnapshotToken).toBe(originalToken);
+    expect(routes.currentRoutes[0]).toMatchObject({ status: "revoked", revocation_reason: "revoked during qualification" });
     expect(nonces.calls).toBe(0);
     expect(hermes.activationCalls).toBe(0);
     expect(hermes.activationWrites).toBe(0);
