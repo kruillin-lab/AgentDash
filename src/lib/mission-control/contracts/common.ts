@@ -22,8 +22,13 @@ export const FolderIdSchema = opaqueId<"FolderId">();
 export const ProjectIdSchema = opaqueId<"ProjectId">();
 export const EventIdSchema = opaqueId<"EventId">();
 export const ProposalIdSchema = opaqueId<"ProposalId">();
+export const RunIdSchema = opaqueId<"RunId">();
+export const ArtifactKeySchema = opaqueId<"ArtifactKey">();
 export const ActionNodeIdSchema = opaqueId<"ActionNodeId">();
 export const RouteIdSchema = opaqueId<"RouteId">();
+const gitObjectId = <Brand extends string>() => z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/).brand<Brand>();
+export const GitCommitIdSchema = gitObjectId<"GitCommitId">();
+export const GitTreeIdSchema = gitObjectId<"GitTreeId">();
 export const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/).brand<"Digest">();
 export const TimestampSchema = z.string().datetime({ offset: true });
 
@@ -45,8 +50,12 @@ export type FolderId = z.infer<typeof FolderIdSchema>;
 export type ProjectId = z.infer<typeof ProjectIdSchema>;
 export type EventId = z.infer<typeof EventIdSchema>;
 export type ProposalId = z.infer<typeof ProposalIdSchema>;
+export type RunId = z.infer<typeof RunIdSchema>;
+export type ArtifactKey = z.infer<typeof ArtifactKeySchema>;
 export type ActionNodeId = z.infer<typeof ActionNodeIdSchema>;
 export type RouteId = z.infer<typeof RouteIdSchema>;
+export type GitCommitId = z.infer<typeof GitCommitIdSchema>;
+export type GitTreeId = z.infer<typeof GitTreeIdSchema>;
 export type Digest = z.infer<typeof DigestSchema>;
 export type Timestamp = z.infer<typeof TimestampSchema>;
 
@@ -78,6 +87,15 @@ export const WorkspaceScopeV1Schema = z.object({
 }).strict();
 export type WorkspaceScopeV1 = z.infer<typeof WorkspaceScopeV1Schema>;
 
+/** Validated workspace boundary plus the controller policy that selected it. */
+export const WorkspacePolicyV1Schema = z.object({
+  schema_version: z.literal("agentdash.workspace-policy/v1"),
+  workspace: WorkspaceScopeV1Schema,
+  allowed_roots: z.array(z.string().min(1)).min(1),
+  require_isolated_worktree: z.boolean(),
+}).strict().refine((value) => !value.require_isolated_worktree || value.workspace.mode === "isolated_worktree", "isolated-worktree policy requires an isolated worktree");
+export type WorkspacePolicyV1 = z.infer<typeof WorkspacePolicyV1Schema>;
+
 export const BudgetV1Schema = z.object({
   max_cost_usd: z.number().finite().nonnegative(),
   max_runtime_ms: z.number().int().positive(),
@@ -85,6 +103,21 @@ export const BudgetV1Schema = z.object({
   max_provider_tokens: z.number().int().nonnegative(),
 }).strict();
 export type BudgetV1 = z.infer<typeof BudgetV1Schema>;
+
+export const ReconciliationDeadlineV1Schema = z.object({ max_attempts: z.number().int().positive(), deadline_ms: z.number().int().positive() }).strict();
+export type ReconciliationDeadlineV1 = z.infer<typeof ReconciliationDeadlineV1Schema>;
+export const ReconciliationDeadlinesV1Schema = z.object({
+  dispatch_lookup: ReconciliationDeadlineV1Schema,
+  cancel_confirmation: ReconciliationDeadlineV1Schema,
+  orphan_recovery: ReconciliationDeadlineV1Schema,
+  finalization: ReconciliationDeadlineV1Schema,
+  receipt_delivery: ReconciliationDeadlineV1Schema,
+}).strict();
+export type ReconciliationDeadlinesV1 = z.infer<typeof ReconciliationDeadlinesV1Schema>;
+
+/** Opaque, pre-redacted transport evidence; never a raw adapter payload. */
+export const RedactedPayloadV1Schema = z.object({ redacted: z.literal(true), digest: DigestSchema, summary: z.string().min(1).max(4096) }).strict();
+export type RedactedPayloadV1 = z.infer<typeof RedactedPayloadV1Schema>;
 
 function canonicalValue(value: unknown, stack: Set<object>): string {
   if (value === null) return "null";
