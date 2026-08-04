@@ -12,14 +12,19 @@
       "required": ["changed-files"]
     },
     "normal": {
-      "required": ["changed-files", "build", "lint", "typecheck"],
+      "required": ["changed-files", "test-unit", "build", "lint", "typecheck"],
       "conditional": ["markdown-audit-if-docs-changed"]
     },
     "release": {
-      "required": ["changed-files", "build", "lint", "typecheck"]
+      "required": ["changed-files", "test-unit", "build", "lint", "typecheck"]
     }
   },
   "commands": {
+    "test-unit": {
+      "shell": "powershell",
+      "command": "npm run test:unit",
+      "timeout_seconds": 180
+    },
     "build": {
       "shell": "powershell",
       "command": "npm run build",
