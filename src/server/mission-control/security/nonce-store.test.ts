@@ -67,7 +67,7 @@ describe("persistent nonce consumption", () => {
     await writeFile(destination, sentinel, "utf8");
 
     await expect(createNonceStore({ state_directory, now: () => now }).consume(input)).resolves.toBe("replayed");
-    await expect(readFile(destination, "utf8")).resolves.toBe(sentinel);
+    expect((await readFile(destination, "utf8")) === sentinel).toBe(true);
   });
 
   test("fails closed for an expired nonce", async () => {
@@ -86,7 +86,13 @@ describe("persistent nonce consumption", () => {
     await expect(
       nonces.consume({ session_id: "session-1234567890", nonce: "nonce-repo-local-01", expires_at: now + 60_000 }),
     ).resolves.toBe("expired");
-    await expect(lstat(state_directory)).rejects.toMatchObject({ code: "ENOENT" });
+    let stateWasNotCreated = false;
+    try {
+      await lstat(state_directory);
+    } catch (error) {
+      stateWasNotCreated = (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    expect(stateWasNotCreated).toBe(true);
   });
 
   test("rejects a state-root junction without changing its target", async () => {
@@ -105,7 +111,7 @@ describe("persistent nonce consumption", () => {
         expires_at: now + 60_000,
       }),
     ).resolves.toBe("expired");
-    await expect(readFile(sentinel, "utf8")).resolves.toBe("unchanged");
+    expect((await readFile(sentinel, "utf8")) === "unchanged").toBe(true);
   });
 
   test("rejects a security-directory junction without changing outside files", async () => {
@@ -122,7 +128,7 @@ describe("persistent nonce consumption", () => {
         expires_at: now + 60_000,
       }),
     ).resolves.toBe("expired");
-    await expect(readFile(sentinel, "utf8")).resolves.toBe("unchanged");
+    expect((await readFile(sentinel, "utf8")) === "unchanged").toBe(true);
   });
 
   test("rejects a junction at the nonce destination without changing outside files", async () => {
@@ -136,7 +142,7 @@ describe("persistent nonce consumption", () => {
     await directoryLink(outside, destination);
 
     await expect(createNonceStore({ state_directory, now: () => now }).consume(input)).resolves.toBe("expired");
-    await expect(readFile(sentinel, "utf8")).resolves.toBe("unchanged");
+    expect((await readFile(sentinel, "utf8")) === "unchanged").toBe(true);
   });
 
   test("fails closed when the security location is an ordinary file", async () => {
@@ -151,6 +157,6 @@ describe("persistent nonce consumption", () => {
         expires_at: now + 60_000,
       }),
     ).resolves.toBe("expired");
-    await expect(readFile(security, "utf8")).resolves.toBe("unchanged");
+    expect((await readFile(security, "utf8")) === "unchanged").toBe(true);
   });
 });

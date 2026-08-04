@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { describe, expect, test } from "vitest";
 
@@ -28,24 +29,38 @@ describe("command sessions", () => {
   test("issues an HttpOnly SameSite=Strict cookie without leaking the signing secret", () => {
     const issued = issueCommandSession({ secret: signingSecret, now });
 
-    expect(issued.set_cookie).toContain("HttpOnly");
-    expect(issued.set_cookie).toContain("SameSite=Strict");
-    expect(issued.set_cookie).not.toContain(signingSecret);
-    expect(issued.csrf_token).not.toContain(signingSecret);
-    expect(issued.session.csrf_digest).not.toContain(signingSecret);
+    expect(issued.set_cookie.includes("HttpOnly")).toBe(true);
+    expect(issued.set_cookie.includes("SameSite=Strict")).toBe(true);
+    expect(issued.set_cookie.includes(signingSecret)).toBe(false);
+    expect(issued.csrf_token.includes(signingSecret)).toBe(false);
+    expect(issued.session.csrf_digest.includes(signingSecret)).toBe(false);
+  });
+
+  test("evaluates seeded command material through an opaque report-safety predicate", () => {
+    const issued = issueCommandSession({ secret: signingSecret, now });
+    const seededValues = [
+      issued.set_cookie,
+      issued.cookie,
+      issued.csrf_token,
+      issued.session.session_id,
+      issued.session.csrf_digest,
+    ];
+    const valuesStayOpaque = seededValues.every((value) => value.length > 0 && !value.includes(signingSecret));
+
+    expect(valuesStayOpaque).toBe(true);
   });
 
   test("rejects a missing session cookie", () => {
     const result = verifyCommandSession({ secret: signingSecret, csrf_token: "any-csrf-value" }, now);
 
-    expect(result).toBeNull();
+    expect(result === null).toBe(true);
   });
 
   test("rejects a missing CSRF header", () => {
     const issued = issueCommandSession({ secret: signingSecret, now });
     const result = verifyCommandSession({ secret: signingSecret, cookie: issued.cookie }, now + 1);
 
-    expect(result).toBeNull();
+    expect(result === null).toBe(true);
   });
 
   test("rejects a mismatched CSRF header", () => {
@@ -55,7 +70,7 @@ describe("command sessions", () => {
       now + 1,
     );
 
-    expect(result).toBeNull();
+    expect(result === null).toBe(true);
   });
 
   test("rejects an expired or tampered signed session", () => {
@@ -69,8 +84,8 @@ describe("command sessions", () => {
       now + 1,
     );
 
-    expect(expired).toBeNull();
-    expect(tampered).toBeNull();
+    expect(expired === null).toBe(true);
+    expect(tampered === null).toBe(true);
   });
 
   test("rejects a byte-equivalent signature with noncanonical trailing bits", () => {
@@ -143,6 +158,13 @@ describe("command sessions", () => {
       now + 1,
     );
 
-    expect(verified).toEqual(issued.session);
+    const matchesIssuedSession = isDeepStrictEqual(verified, issued.session);
+    const rejectsAdditionalFields = !isDeepStrictEqual(
+      { ...issued.session, unexpected: "must-remain-a-mismatch" },
+      issued.session,
+    );
+
+    expect(matchesIssuedSession).toBe(true);
+    expect(rejectsAdditionalFields).toBe(true);
   });
 });
