@@ -13,7 +13,7 @@
     "check": "npm run lint && npm run typecheck && npm run build",
     "test": "npm run test:unit",
     "test:unit": "vitest run --config vitest.config.ts",
-    "test:live": "vitest run --config vitest.config.ts --dir tests/live",
+    "test:live": "vitest run --config vitest.config.ts --mode live",
     "test:e2e": "playwright test --config playwright.config.ts",
     "mission-control:probe": "node scripts/mission-control/write-gate-manifest.mjs"
   },

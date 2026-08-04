@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -14,8 +14,6 @@ const nonceInputSchema = z
     expires_at: z.number().int().positive(),
   })
   .strict();
-const nonceRecordSchema = z.object({ schema_version: z.literal("nonce_consumption_v1"), expires_at: z.number().int().positive() }).strict();
-
 export type NonceConsumption = "consumed" | "replayed" | "expired";
 
 export interface NonceStore {
@@ -90,15 +88,21 @@ function noncePath(location: NonceLocation, sessionId: string, nonce: string): s
   return path.join(location.canonical_security, `nonce-${identifier}.json`);
 }
 
-async function existingNonceResult(destination: string, now: number): Promise<NonceConsumption> {
+async function existingNonceResult(destination: string, location: NonceLocation): Promise<NonceConsumption> {
   try {
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+    await recheckNonceLocation(location);
     await rejectReparsePoint(destination);
     const handle = await open(destination, fsConstants.O_RDONLY | noFollow);
     try {
-      if (!(await handle.stat()).isFile()) return "expired";
-      const parsed = nonceRecordSchema.safeParse(JSON.parse(await handle.readFile({ encoding: "utf8" })));
-      return parsed.success && parsed.data.expires_at > now ? "replayed" : "expired";
+      const [handleStats, canonicalDestination] = await Promise.all([handle.stat(), realpath(destination)]);
+      if (!handleStats.isFile() || comparablePath(path.dirname(canonicalDestination)) !== comparablePath(location.canonical_security)) {
+        return "expired";
+      }
+      const pathStats = await stat(canonicalDestination);
+      if (handleStats.dev !== pathStats.dev || handleStats.ino !== pathStats.ino) return "expired";
+      await recheckNonceLocation(location);
+      return "replayed";
     } finally {
       await handle.close();
     }
@@ -141,7 +145,7 @@ export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE
         if ((error as NodeJS.ErrnoException).code === "EEXIST") {
           try {
             const location = await prepareNonceLocation(state_directory);
-            return await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), currentTime);
+            return await existingNonceResult(noncePath(location, parsed.data.session_id, parsed.data.nonce), location);
           } catch {
             return "expired";
           }

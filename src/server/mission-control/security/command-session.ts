@@ -70,8 +70,9 @@ function parseCookie(cookie: string | undefined, secret: string): CommandSession
   const encodedSignature = parts.length === 2 ? parts[1] : "";
   const signatureIsEncoded = /^[A-Za-z0-9_-]{43}$/.test(encodedSignature);
   const suppliedSignature = signatureIsEncoded ? Buffer.from(encodedSignature, "base64url") : Buffer.alloc(32);
+  const signatureIsCanonical = signatureIsEncoded && suppliedSignature.toString("base64url") === encodedSignature;
   const expectedSignature = sign(encodedSession, secret);
-  const signatureMatches = timingSafeEqual(expectedSignature, suppliedSignature) && signatureIsEncoded;
+  const signatureMatches = timingSafeEqual(expectedSignature, suppliedSignature) && signatureIsCanonical;
   if (!signatureMatches || !/^[A-Za-z0-9_-]{1,2048}$/.test(encodedSession)) return null;
 
   try {
