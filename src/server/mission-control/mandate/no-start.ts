@@ -13,6 +13,8 @@ import {
 import { proveMandateBudget } from "./budget-proof";
 import { validateMandateGraph } from "./graph";
 
+const MODEL_BACKED_MUTATING_ROLES = new Set(["execute", "retry", "remediate", "reconcile"]);
+
 export interface NoStartInput {
   task_spec: TaskSpecV1;
   mandate: ExecutionMandateV1;
@@ -71,6 +73,37 @@ export function runNoStartChecks(rawInput: NoStartInput): NoStartReportV1 {
   }
   if (mandate.request_id !== task.request_id || mandate.workspace_scope.project_id !== task.workspace.project_id || mandate.workspace_scope.mode !== task.workspace.mode || mandate.workspace_scope.path !== task.workspace.path) {
     addReason(reasons, "task_binding_mismatch", "The mandate request or workspace binding differs from the TaskSpec.");
+  }
+  if (task.prohibited_actions.some((prohibition) => !mandate.capability_scope.prohibited_actions.includes(prohibition))) {
+    addReason(reasons, "capability_scope_mismatch", "The mandate capability scope weakens a TaskSpec prohibition.");
+  }
+  if (task.finalization.authority_predicate.allowed_external_mutation !== (mandate.finalization_step.mutation_type === "approved_merge")) {
+    addReason(reasons, "external_mutation_authority_mismatch", "Finalization authority does not match the TaskSpec external-mutation predicate.");
+  }
+  const phaseRoles = { execute: "execute", fallback: "retry", remediate: "remediate", verify: "verify", finalize: "finalize" } as const;
+  const deterministicExecutors = { execute: "controller", fallback: "controller", remediate: "controller", verify: "verifier", finalize: "finalizer" } as const;
+  const phaseRoleSet = new Set<string>(Object.values(phaseRoles));
+  const phaseNodes = mandate.action_nodes.filter((node) => phaseRoleSet.has(node.action_role));
+  if (phaseNodes.length !== task.route_plan.length) addReason(reasons, "phase_binding_mismatch", "Mandate phase actions must correspond one-to-one with TaskSpec phases.");
+  for (const [index, phase] of task.route_plan.entries()) {
+    const node = phaseNodes[index];
+    const expectedExecutor = phase.deterministic ? deterministicExecutors[phase.phase] : "codeg_worker";
+    if (!node || node.action_role !== phaseRoles[phase.phase] || node.executor_kind !== expectedExecutor || node.route_id !== phase.route_id) {
+      addReason(reasons, "phase_binding_mismatch", "Every TaskSpec phase must positionally match its mandate role, executor, and route.");
+    }
+  }
+  const verifierPhases = task.route_plan.filter((phase) => phase.phase === "verify");
+  const verifierNodes = mandate.action_nodes.filter((node) => node.action_role === "verify");
+  if (verifierPhases.length !== 1 || verifierNodes.length !== 1) {
+    addReason(reasons, "phase_binding_mismatch", "No-start requires exactly one bound verifier phase and action.");
+  } else {
+    const phase = verifierPhases[0];
+    const node = verifierNodes[0];
+    const verifier = mandate.verification_step;
+    const exactVerifier = phase.deterministic
+      ? node.executor_kind === "verifier" && node.route_id === null && verifier.deterministic_verifier_id === phase.name && verifier.route_id === null && verifier.route_proof_id === null && verifier.route_proof_digest === null
+      : node.executor_kind === "codeg_worker" && verifier.deterministic_verifier_id === null && verifier.route_id === phase.route_id && verifier.route_id === node.route_id && verifier.route_proof_id === node.route_proof_id && verifier.route_proof_digest === node.route_proof_digest;
+    if (!exactVerifier) addReason(reasons, "phase_binding_mismatch", "The verifier step must exactly match its TaskSpec phase and mandate action.");
   }
 
   const graph = validateMandateGraph({
@@ -131,7 +164,7 @@ export function runNoStartChecks(rawInput: NoStartInput): NoStartReportV1 {
 
   if (verifier.required_independence_tier === 2) {
     for (const path of graph.paths.filter((candidate) => candidate.terminal_outcome === "succeeded")) {
-      const verifierIndex = path.node_ids.findIndex((nodeId) => mandate.action_nodes.find((node) => node.node_id === nodeId)?.action_role === "verify");
+      const verifierIndex = path.node_ids.findLastIndex((nodeId) => mandate.action_nodes.find((node) => node.node_id === nodeId)?.action_role === "verify");
       const verifierNode = verifierIndex >= 0 ? mandate.action_nodes.find((node) => node.node_id === path.node_ids[verifierIndex]) : undefined;
       const verifierEvidence = verifierNode?.route_id ? evidenceByRoute.get(verifierNode.route_id) : undefined;
       if (!verifierEvidence) {
@@ -140,10 +173,10 @@ export function runNoStartChecks(rawInput: NoStartInput): NoStartReportV1 {
       }
       for (const nodeId of path.node_ids.slice(0, verifierIndex)) {
         const node = mandate.action_nodes.find((candidate) => candidate.node_id === nodeId);
-        if (node?.executor_kind !== "codeg_worker" || node.route_id === null || node.action_role === "verify") continue;
+        if (node?.executor_kind !== "codeg_worker" || node.route_id === null || !MODEL_BACKED_MUTATING_ROLES.has(node.action_role)) continue;
         const mutationEvidence = evidenceByRoute.get(node.route_id);
         if (!mutationEvidence || mutationEvidence.provider === verifierEvidence.provider || mutationEvidence.outer_harness === verifierEvidence.outer_harness) {
-          addReason(reasons, "verifier_not_independent", "Tier 2 verification must use a different provider and outer harness from every preceding model-backed action.");
+          addReason(reasons, "verifier_not_independent", "Tier 2 verification must use a different provider and outer harness from every model-backed mutation that can reach success.");
         }
       }
     }

@@ -17,6 +17,7 @@ const taskShape = z.object({
 }).strict();
 export const TaskSpecV1Schema = taskShape.superRefine((v, c) => {
   if (v.workspace.project_id !== v.project_id || v.workspace_policy.workspace.project_id !== v.project_id || v.workspace.mode !== v.workspace_policy.workspace.mode || v.workspace.path !== v.workspace_policy.workspace.path) c.addIssue({ code: z.ZodIssueCode.custom, message: "workspace policy scope must exactly match TaskSpec" });
+  if (v.finalization.authority_predicate.allowed_external_mutation !== (v.finalization.mutation_type === "approved_merge")) c.addIssue({ code: z.ZodIssueCode.custom, path: ["finalization", "authority_predicate", "allowed_external_mutation"], message: "external-mutation authority must exactly match approved-merge finalization" });
   const required = ["execute", "fallback", "remediate", "verify", "finalize"] as const;
   let highestRank = -1;
   for (const item of v.route_plan) {
@@ -24,6 +25,6 @@ export const TaskSpecV1Schema = taskShape.superRefine((v, c) => {
     if (rank < highestRank) c.addIssue({ code: z.ZodIssueCode.custom, message: "route phases may not regress" });
     highestRank = Math.max(highestRank, rank);
   }
-  for (const phase of required) if (!v.route_plan.some((item) => item.phase === phase)) c.addIssue({ code: z.ZodIssueCode.custom, message: "route plan is missing a required phase" });
+  for (const phase of required) if (v.route_plan.filter((item) => item.phase === phase).length !== 1) c.addIssue({ code: z.ZodIssueCode.custom, message: "route plan requires exactly one of every executable phase" });
 });
 export type TaskSpecV1 = z.infer<typeof TaskSpecV1Schema>;

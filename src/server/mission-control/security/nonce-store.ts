@@ -24,9 +24,16 @@ const nonceRecordSchema = z.object({
 export type NonceConsumption =
   | { status: "consumed" | "replayed_same"; consumed_at: number }
   | { status: "replayed_conflict" | "expired" };
+export type NonceReplayLookup =
+  | { status: "replayed_same"; consumed_at: number }
+  | { status: "replayed_conflict" | "expired" | "missing" };
+type ExistingNonceResult =
+  | { status: "replayed_same"; consumed_at: number }
+  | { status: "replayed_conflict" | "expired" };
 
 export interface NonceStore {
   consume(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceConsumption>;
+  lookup(input: { session_id: string; nonce: string; expires_at: number; binding_digest: string }): Promise<NonceReplayLookup>;
 }
 
 export interface CreateNonceStoreOptions {
@@ -78,6 +85,24 @@ async function prepareNonceLocation(stateDirectory: string): Promise<NonceLocati
   return { canonical_repository, configured_state, canonical_state, canonical_security };
 }
 
+async function existingNonceLocation(stateDirectory: string): Promise<NonceLocation | null> {
+  const configured_state = path.resolve(stateDirectory);
+  const canonical_repository = await realpath(process.cwd());
+  if (isWithin(canonical_repository, configured_state)) throw new Error("unsafe filesystem location");
+  await rejectReparsePoint(configured_state);
+  try {
+    const canonical_state = await realpath(configured_state);
+    const configuredSecurity = path.join(canonical_state, "security");
+    await rejectReparsePoint(configuredSecurity);
+    const canonical_security = await realpath(configuredSecurity);
+    if (!isWithin(canonical_state, canonical_security) || isWithin(canonical_repository, canonical_state)) throw new Error("unsafe filesystem location");
+    return { canonical_repository, configured_state, canonical_state, canonical_security };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 async function recheckNonceLocation(location: NonceLocation): Promise<void> {
   await rejectReparsePoint(location.configured_state);
   await rejectReparsePoint(location.canonical_security);
@@ -102,7 +127,7 @@ async function existingNonceResult(
   location: NonceLocation,
   input: z.infer<typeof nonceInputSchema>,
   currentTime: number,
-): Promise<NonceConsumption> {
+): Promise<ExistingNonceResult> {
   try {
     const noFollow = fsConstants.O_NOFOLLOW ?? 0;
     await recheckNonceLocation(location);
@@ -136,6 +161,25 @@ async function existingNonceResult(
 
 export function createNonceStore({ state_directory = process.env.AGENTDASH_STATE_DIR, now = Date.now }: CreateNonceStoreOptions = {}): NonceStore {
   return {
+    async lookup(input): Promise<NonceReplayLookup> {
+      const currentTime = now();
+      const parsed = nonceInputSchema.safeParse(input);
+      if (!Number.isSafeInteger(currentTime) || !parsed.success || parsed.data.expires_at <= currentTime || parsed.data.expires_at - currentTime > MAX_COMMAND_SESSION_TTL_MS || !state_directory) return { status: "expired" };
+      try {
+        const location = await existingNonceLocation(state_directory);
+        if (!location) return { status: "missing" };
+        const destination = noncePath(location, parsed.data.session_id, parsed.data.nonce);
+        try {
+          await lstat(destination);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing" };
+          return { status: "expired" };
+        }
+        return await existingNonceResult(destination, location, parsed.data, currentTime);
+      } catch {
+        return { status: "expired" };
+      }
+    },
     async consume(input): Promise<NonceConsumption> {
       const currentTime = now();
       const parsed = nonceInputSchema.safeParse(input);

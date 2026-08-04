@@ -4,6 +4,8 @@ import type {
   ActivateMandateInput,
   ActivateMandateResult,
   ActivationSnapshotV1,
+  GetActivationQualificationInput,
+  GetActivationQualificationResult,
   AdapterResultEnvelopeV1,
   AppendRunEventInput,
   BindWorkerSessionInput,
@@ -46,6 +48,8 @@ export type {
   ActivateMandateInput,
   ActivateMandateResult,
   ActivationSnapshotV1,
+  GetActivationQualificationInput,
+  GetActivationQualificationResult,
   AppendRunEventInput,
   BindWorkerSessionInput,
   CloseActionInput,
@@ -75,6 +79,7 @@ export interface HermesPort {
   persistIntake(input: PersistIntakeInput): Promise<PersistIntakeResult>;
   ensureArtifact(input: EnsureArtifactInput): Promise<EnsureArtifactResult>;
   getActivationSnapshot(task_id: string): Promise<ActivationSnapshotV1>;
+  qualifyActivation(input: GetActivationQualificationInput): Promise<GetActivationQualificationResult>;
   lookupActivationByCommand(command_id: string): Promise<LookupActivationByCommandResult>;
   activateMandate(input: ActivateMandateInput): Promise<ActivateMandateResult>;
   prepareAction(input: PrepareActionInput): Promise<PreparedActionResult>;

@@ -97,7 +97,7 @@ describe("deterministic intake compiler", () => {
 
     expect(spaced.status).toBe("compiled");
     expect(normalized.status).toBe("compiled");
-    if (spaced.status === "compiled" && normalized.status === "compiled") {
+    if (spaced.status === "compiled" && normalized.status === "compiled" && spaced.mandate && normalized.mandate) {
       expect(spaced.request_digest).toBe(normalized.request_digest);
       expect(spaced.task_id).toBe(normalized.task_id);
       expect(spaced.mandate.mandate_id).toBe(normalized.mandate.mandate_id);
@@ -121,17 +121,100 @@ describe("deterministic intake compiler", () => {
   test("persists only a deterministic precommit for approval-required work", () => {
     const result = compileIntake(input());
     expect(result.status).toBe("compiled");
-    if (result.status === "compiled") {
+    if (result.status === "compiled" && result.mandate) {
       expect(result.mandate.authority_source).toMatchObject({ kind: "approval_precommit", binding: "precommitted_at_intake" });
       expect(JSON.stringify(result.readiness)).not.toContain("approval-grant/v1");
     }
   });
 
-  test("returns typed clarification without malformed artifacts for invalid policy or PM output", () => {
+  test("returns retryable intake_unavailable for invalid policy, PM input, trusted time, or approval deadline policy", () => {
     const badDigest = compileIntake(input({ compilation_policy_digest: "a".repeat(64) }));
     const pmAuthority = compileIntake(input({ pm_output: { ...input().pm_output, authority: { approved: true } } }));
+    const badTime = compileIntake(input({ now: "not-a-time" }));
+    const badDeadlinePolicy = policy();
+    badDeadlinePolicy.approval_request_ttl_ms = badDeadlinePolicy.mandate_ttl_ms + 1;
+    const badDeadline = compileIntake(input({ compilation_policy: badDeadlinePolicy, compilation_policy_digest: canonicalDigest(badDeadlinePolicy) }));
 
-    expect(badDigest).toMatchObject({ status: "clarification_required", reasons: [{ code: "compilation_policy_mismatch" }] });
-    expect(pmAuthority).toMatchObject({ status: "clarification_required", reasons: [{ code: "invalid_pm_output" }] });
+    expect(badDigest).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "compilation_policy_mismatch" }] });
+    expect(pmAuthority).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "invalid_pm_output" }] });
+    expect(badTime).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "invalid_compilation_time" }] });
+    expect(badDeadline).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "compilation_policy_mismatch" }] });
+  });
+
+  test("returns retryable intake_unavailable when server policy cannot produce a valid TaskSpec", () => {
+    const invalidTaskPolicy = policy();
+    invalidTaskPolicy.task_template.workspace_policy.workspace = {
+      ...invalidTaskPolicy.task_template.workspace_policy.workspace,
+      path: "C:/workspace/other",
+    };
+
+    const result = compileIntake(input({
+      compilation_policy: invalidTaskPolicy,
+      compilation_policy_digest: canonicalDigest(invalidTaskPolicy),
+    }));
+
+    expect(result).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "invalid_task_spec" }] });
+  });
+
+  test("returns retryable intake_unavailable for structural graph and budget arithmetic failures", () => {
+    const invalidGraphPolicy = policy();
+    invalidGraphPolicy.mandate_template.visit_caps.execute = 33;
+    const arithmeticPolicy = policy();
+    arithmeticPolicy.budget_policy.task_reserves.verification.max_cost_usd = Number.MAX_SAFE_INTEGER;
+
+    const invalidGraph = compileIntake(input({
+      compilation_policy: invalidGraphPolicy,
+      compilation_policy_digest: canonicalDigest(invalidGraphPolicy),
+    }));
+    const arithmeticFailure = compileIntake(input({
+      compilation_policy: arithmeticPolicy,
+      compilation_policy_digest: canonicalDigest(arithmeticPolicy),
+    }));
+
+    expect(invalidGraph).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "invalid_graph" }] });
+    expect(arithmeticFailure).toMatchObject({ status: "intake_unavailable", reasons: [{ code: "invalid_budget" }] });
+  });
+
+  test("persists an invalid candidate mandate as a truthful nullable blocked_no_start artifact", () => {
+    const invalidMandatePolicy = policy();
+    const orphanLimit = { max_cost_usd: 1, max_runtime_ms: 1_000, max_output_tokens: 100, max_provider_tokens: 200 };
+    invalidMandatePolicy.mandate_template.per_action_limits.orphan = orphanLimit;
+    invalidMandatePolicy.budget_policy.action_limits.orphan = orphanLimit;
+
+    const result = compileIntake(input({
+      compilation_policy: invalidMandatePolicy,
+      compilation_policy_digest: canonicalDigest(invalidMandatePolicy),
+    }));
+
+    expect(result).toMatchObject({
+      status: "compiled",
+      mandate: null,
+      readiness: {
+        kind: "blocked_no_start",
+        candidate_mandate: null,
+        no_start: { ready: false, reasons: [{ code: "invalid_mandate" }] },
+        activation: null,
+      },
+    });
+  });
+
+  test("persists a structurally valid but unsafe candidate as blocked_no_start", () => {
+    const unsafePolicy = policy();
+    unsafePolicy.mandate_template.transition_graph.finalize.succeeded = { kind: "terminal", outcome: "failed" };
+
+    const result = compileIntake(input({
+      compilation_policy: unsafePolicy,
+      compilation_policy_digest: canonicalDigest(unsafePolicy),
+    }));
+
+    expect(result).toMatchObject({
+      status: "compiled",
+      readiness: {
+        kind: "blocked_no_start",
+        no_start: { ready: false, reasons: expect.arrayContaining([expect.objectContaining({ code: "graph_missing_terminal_success" })]) },
+        activation: null,
+      },
+    });
+    if (result.status === "compiled") expect(result.mandate).not.toBeNull();
   });
 });

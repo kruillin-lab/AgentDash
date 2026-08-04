@@ -7,6 +7,7 @@ const MAX_EXPANDED_STATES = 8_192;
 const MAX_REMEDIATION_ITEMS = 32;
 const MAX_RECONCILIATION_ATTEMPTS = 32;
 const MAX_RECONCILIATION_DEADLINE_MS = 24 * 60 * 60 * 1_000;
+const MUTATING_ACTION_ROLES: ReadonlySet<ActionRole> = new Set(["execute", "retry", "remediate", "reconcile"]);
 
 type GraphTarget =
   | { kind: "node"; node_id: string }
@@ -93,8 +94,8 @@ export function validateMandateGraph(input: MandateGraphInput): MandateGraphVali
       if (target.kind === "reconciliation" && (!finiteCap(target.max_attempts, MAX_RECONCILIATION_ATTEMPTS) || !finiteCap(target.deadline_ms, MAX_RECONCILIATION_DEADLINE_MS))) {
         addReason(reasons, "graph_open_reconciliation", "Reconciliation must be bounded by attempts and deadline.");
       }
-      if (target.kind === "terminal" && target.outcome === "succeeded" && node.action_role !== "finalize") {
-        addReason(reasons, "graph_invalid_terminal_success", "Only the exact finalization action may transition to succeeded.");
+      if (target.kind === "terminal" && target.outcome === "succeeded" && (node.action_role !== "finalize" || outcome !== "succeeded")) {
+        addReason(reasons, "graph_invalid_terminal_success", "Only the exact succeeded outcome of finalization may transition to terminal success.");
       }
     }
   }
@@ -159,12 +160,21 @@ export function validateMandateGraph(input: MandateGraphInput): MandateGraphVali
   if (successPaths.length === 0) addReason(reasons, "graph_missing_terminal_success", "The graph has no finite succeeded path.");
   for (const path of successPaths) {
     const roles = path.node_ids.map((id) => nodes.get(id)?.action_role);
-    const verifyIndex = roles.indexOf("verify");
+    const verifyIndex = roles.lastIndexOf("verify");
     const finalizeIndex = roles.lastIndexOf("finalize");
     if (verifyIndex < 0) addReason(reasons, "graph_success_without_verification", "Every succeeded path must visit verification.");
     if (finalizeIndex < 0) addReason(reasons, "graph_success_without_finalization", "Every succeeded path must visit finalization.");
     if (verifyIndex >= 0 && finalizeIndex >= 0 && verifyIndex >= finalizeIndex) addReason(reasons, "graph_invalid_success_order", "Verification must precede finalization on every succeeded path.");
-    if (roles.at(-1) !== "finalize") addReason(reasons, "graph_invalid_terminal_success", "Succeeded must be emitted by the exact finalization action.");
+    if (verifyIndex >= 0 && roles.some((role, index) => index > verifyIndex && role !== undefined && MUTATING_ACTION_ROLES.has(role))) {
+      addReason(reasons, "graph_mutation_after_verification", "Every mutation that can reach success must be followed by the final applicable verification.");
+    }
+    if (verifyIndex >= 0 && roles.slice(verifyIndex + 1).some((role) => role !== "finalize")) {
+      addReason(reasons, "graph_invalid_success_boundary", "Only the bounded finalization segment may follow the final applicable verification.");
+    }
+    const finalNodeId = path.node_ids.at(-1);
+    if (roles.at(-1) !== "finalize" || path.edge_ids.at(-1) !== `${finalNodeId}:succeeded`) {
+      addReason(reasons, "graph_invalid_terminal_success", "Succeeded must be emitted by the exact succeeded outcome of finalization.");
+    }
   }
 
   return { ok: reasons.length === 0, reasons, paths };

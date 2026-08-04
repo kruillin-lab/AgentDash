@@ -54,6 +54,7 @@ const hermesFake = {
   persistIntake: async (): Promise<never> => { throw new Error("fixture only"); },
   ensureArtifact: async () => ({ artifact_id: artifactId, created: true, digest }),
   getActivationSnapshot: async (): Promise<never> => { throw new Error("fixture only"); },
+  qualifyActivation: async (): Promise<never> => { throw new Error("fixture only"); },
   lookupActivationByCommand: async (): Promise<never> => { throw new Error("fixture only"); },
   activateMandate: async (): Promise<never> => { throw new Error("fixture only"); },
   prepareAction: async () => ({ run_id: runId, command: contracts.ActionCommandV1Schema.parse(actionCommand), created: true }),
@@ -233,9 +234,18 @@ validMandate.task_spec_revision = { ...validMandate.task_spec_revision, task_spe
 validMandate.verification_step = { ...validMandate.verification_step, acceptance_digest: acceptanceDigest };
 const mandateDigest = canonicalDigest(validMandate);
 const finalizationPredicate = { mutation_type: "no_change_close", mutation_manifest_digest: validMandate.finalization_step.mutation_manifest.manifest_digest, max_external_mutation: false };
-const ceoInputRequest = { schema_version: "agentdash.ceo-input-request/v1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, active_mandate_id: null, proposed_mandate_id: "mandate-1", proposed_mandate_digest: mandateDigest, decision_type: "initial_mandate_approval", proposed_diff: { digest, summary: "activate mandate" }, proposed_limits: validMandate.aggregate_budget, proposed_route_ids: ["route-1", "route-2", "route-3"], proposed_side_effects: [], rationale: "approval required", evidence_refs: ["evidence-1"], completed_attempt_receipt_ids: [], no_unapproved_action_running: true, created_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
+const ceoInputRequest = { schema_version: "agentdash.ceo-input-request/v1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, active_mandate_id: null, proposed_mandate_id: "mandate-1", proposed_mandate_digest: mandateDigest, decision_type: "initial_mandate_approval", proposed_diff: { digest: canonicalDigest({ task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest }), summary: "activate mandate" }, proposed_limits: validMandate.aggregate_budget, proposed_route_ids: ["route-1", "route-2", "route-3"], proposed_side_effects: [], rationale: "approval required", evidence_refs: ["evidence-1"], completed_attempt_receipt_ids: [], no_unapproved_action_running: true, created_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
+const intakeTaskId = `task-${digest}`;
+const intakeMandate = { ...structuredClone(validMandate), task_id: intakeTaskId };
+const intakeMandateDigest = canonicalDigest(intakeMandate);
+const intakeCeoInputRequest = {
+  ...structuredClone(ceoInputRequest),
+  task_id: intakeTaskId,
+  proposed_mandate_digest: intakeMandateDigest,
+  proposed_diff: { ...ceoInputRequest.proposed_diff, digest: canonicalDigest({ task_spec_digest: taskSpecDigest, mandate_digest: intakeMandateDigest }) },
+};
 const autoActivationReceipt = { schema_version: "agentdash.auto-activation-receipt/v1", authority_id: "authority-1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", objective_digest: objectiveDigest, acceptance_digest: acceptanceDigest, mandate_digest: mandateDigest, ordered_route_ids: ["route-1", "route-2", "route-3"], policy_version: "policy/v1", policy_evidence_digest: digest, capability_scope: capabilityScope, capability_scope_digest: canonicalDigest(capabilityScope), workspace_scope: workspace, aggregate_budget: validMandate.aggregate_budget, finalization_predicate: finalizationPredicate, issued_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
-const approvalGrant = { schema_version: "agentdash.approval-grant/v1", authority_id: "authority-1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", objective_digest: objectiveDigest, acceptance_digest: acceptanceDigest, mandate_digest: mandateDigest, ordered_route_ids: ["route-1", "route-2", "route-3"], capability_scope: capabilityScope, capability_scope_digest: canonicalDigest(capabilityScope), workspace_scope: workspace, aggregate_budget: validMandate.aggregate_budget, finalization_predicate: finalizationPredicate, approved_by: "ceo", source_command_id: "command-1", approved_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
+const approvalGrantBase = { schema_version: "agentdash.approval-grant/v1", authority_id: "authority-1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", objective_digest: objectiveDigest, acceptance_digest: acceptanceDigest, mandate_digest: mandateDigest, ordered_route_ids: ["route-1", "route-2", "route-3"], capability_scope: capabilityScope, capability_scope_digest: canonicalDigest(capabilityScope), workspace_scope: workspace, aggregate_budget: validMandate.aggregate_budget, finalization_predicate: finalizationPredicate, approved_by: "session-1234567890", source_command_id: "command-1", source_snapshot_digest: digest, approved_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
 const actionAuthority = { schema_version: "agentdash.action-authority/v1", authority_id: "authority-1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", mandate_digest: mandateDigest, node_id: "execute", action_role: "execute", executor_kind: "codeg_worker", route_id: "route-1", route_proof_id: "route-proof-1", route_proof_digest: digest, action_input_digest: digest, action_headroom: budget, task_reserve_refs: { verification: "receipt-verification", finalization: "receipt-finalization", cancellation: "receipt-cancellation", reconciliation: "receipt-reconciliation" }, allowed_adapter_operation: "ensure_work", issued_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
 const actionCommand = { schema_version: "agentdash.action-command/v1", command_id: "command-1", idempotency_key: "command-key-1", task_id: "task-1", task_spec_revision: 1, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", mandate_digest: mandateDigest, authority_id: "authority-1", authority_digest: canonicalDigest(actionAuthority), node_id: "execute", node_digest: digest, action_role: "execute", executor_kind: "codeg_worker", adapter_operation: "ensure_work", route_id: "route-1", route_proof_id: "route-proof-1", route_proof_digest: digest, action_input_digest: digest, command_headroom: budget, task_reserve_refs: { verification: "receipt-verification", finalization: "receipt-finalization", cancellation: "receipt-cancellation", reconciliation: "receipt-reconciliation" }, state: "prepared", created_at: timestamp, issued_at: timestamp, submitted_at: null, reconciled_at: null, expires_at: "2026-08-04T12:00:00.000Z" };
 const actionOutcome = { schema_version: "agentdash.action-outcome/v1", outcome: "succeeded", command_id: "command-1", attempt_id: 1, task_id: "task-1", evidence_refs: ["event-1"], route_facts: { route_id: "route-1", route_proof_id: "route-proof-1", route_proof_digest: digest }, policy_facts: { policy_version: "policy/v1", policy_digest: digest }, adapter_terminal_code: "completed", adapter_sequence: 1, required_checks: [{ check_id: "check", passed: true, raw_result_digest: digest }], files: [{ path: "src/result.ts", digest, kind: "produced" }], budget_snapshot: budget, usage: { cost_usd: 0.1, runtime_ms: 1_000, tokens: 100 }, classifier_policy_version: "classifier/v1", rationale: "all checks passed", uncertainty: [], cancellation_detail: null, failure_detail: null, native_session: { kind: "available", uri: "codeg://session/conversation-1" } };
@@ -287,10 +297,10 @@ const compilationPolicy = {
 };
 const pmPresentation = { text: "A bounded proposal is ready.", session_ref: "pm-session-1", proposal: { schema_version: "agentdash.management-proposal/v1", proposal_id: "proposal-1", task_id: null, intent: "create_task", created_at: timestamp } };
 const noStartReady = { schema_version: "agentdash.no-start-report/v1", ready: true, reasons: [] };
-const approvalReadiness = {
+const approvalReadiness = contracts.IntakeReadinessV1Schema.parse({
   schema_version: "agentdash.intake-readiness/v1",
   kind: "approval_required",
-  task_id: "task-1",
+  task_id: intakeTaskId,
   request_digest: digest,
   pm: pmPresentation,
   proposal_digest: canonicalDigest(pmPresentation.proposal),
@@ -298,15 +308,55 @@ const approvalReadiness = {
   budget_policy_digest: canonicalDigest(budgetPolicySnapshot),
   artifact_digest: digest,
   task_spec: taskSpec,
-  mandate: validMandate,
+  mandate: intakeMandate,
   route_snapshot: compilationPolicy.route_snapshot,
   no_start: noStartReady,
-  activation: { kind: "approval_required", request: ceoInputRequest },
-};
-const persistIntake = { request_id: "request-1", request_digest: digest, claim_id: "claim-1", claim_generation: 1, staged_pm_digest: canonicalDigest(pmPresentation), card_authorization_digest: digest, artifact_digest: digest, readiness: approvalReadiness };
-const ceoCommand = { schema_version: "agentdash.ceo-command/v1", command_id: "command-1", replay_nonce: "nonce-12345678901", authenticated_session_id: "session-1234567890", csrf_valid: true, origin_valid: true, command_type: "approve", task_id: "task-1", displayed_task_spec_revision: 1, displayed_task_spec_digest: taskSpecDigest, active_mandate_id: null, proposed_mandate_id: "mandate-1", viewed_mandate_digest: mandateDigest, requested_decision: "initial_mandate_approval", created_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
-const activationResult = { schema_version: "agentdash.activation-result/v1", task_id: "task-1", command_id: "command-1", authority_id: "authority-1", task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest, activated_at: timestamp };
-const pendingActivationSnapshot = { status: "pending", snapshot_digest: digest, request_digest: digest, task_spec: taskSpec, mandate: validMandate, approval_request: ceoInputRequest };
+  activation: { kind: "approval_required", request: intakeCeoInputRequest },
+});
+const persistIntakeAuthorization = { claim_id: "claim-1", claim_generation: 1, request_digest: digest, staged_pm_digest: canonicalDigest(pmPresentation), artifact_digest: digest, readiness: approvalReadiness };
+const persistIntake = { request_id: "request-1", ...persistIntakeAuthorization, card_authorization_digest: contracts.canonicalCardAuthorizationDigest(persistIntakeAuthorization) };
+const qualificationBase = { source_snapshot_digest: digest, request_digest: digest, task_id: intakeTaskId, task_spec_digest: taskSpecDigest, mandate_id: "mandate-1", mandate_digest: intakeMandateDigest, approval_request_digest: canonicalDigest(intakeCeoInputRequest), budget_policy_digest: canonicalDigest(budgetPolicySnapshot), route_registry_revision: 1, routes: approvalReadiness.route_snapshot, route_snapshot_digest: canonicalDigest(approvalReadiness.route_snapshot), valid_until: "2026-08-04T12:00:00.000Z" };
+const activationQualification = { schema_version: "agentdash.activation-qualification/v1", ...qualificationBase, qualification_digest: contracts.canonicalActivationQualificationDigest(qualificationBase) };
+const ceoCommand = { schema_version: "agentdash.ceo-command/v1", command_id: "command-1", replay_nonce: "nonce-12345678901", authenticated_session_id: "session-1234567890", csrf_valid: true, origin_valid: true, command_type: "approve", task_id: "task-1", displayed_task_spec_revision: 1, displayed_task_spec_digest: taskSpecDigest, active_mandate_id: null, proposed_mandate_id: "mandate-1", viewed_mandate_digest: mandateDigest, requested_decision: "initial_mandate_approval", source_snapshot_digest: digest, qualification_digest: activationQualification.qualification_digest, created_at: timestamp, expires_at: "2026-08-04T12:00:00.000Z" };
+const approvalGrant = { ...approvalGrantBase, qualification_digest: activationQualification.qualification_digest };
+const intakeCeoCommand = { ...ceoCommand, task_id: intakeTaskId, viewed_mandate_digest: intakeMandateDigest };
+const intakeApprovalGrant = { ...approvalGrant, task_id: intakeTaskId, mandate_digest: intakeMandateDigest };
+const activationResult = { schema_version: "agentdash.activation-result/v1", task_id: intakeTaskId, command_id: "command-1", authority_id: "authority-1", task_spec_digest: taskSpecDigest, mandate_digest: intakeMandateDigest, source_snapshot_digest: digest, qualification_digest: activationQualification.qualification_digest, activated_at: timestamp };
+const pendingActivationSnapshot = { status: "pending", snapshot_digest: digest, request_digest: digest, task_spec: taskSpec, mandate: intakeMandate, approval_request: intakeCeoInputRequest, readiness: approvalReadiness, budget_policy: budgetPolicySnapshot };
+const activeActivationSnapshot = { status: "active", snapshot_digest: "b".repeat(64), source_snapshot_digest: digest, request_digest: digest, task_spec: taskSpec, mandate: intakeMandate, source_approval_request: intakeCeoInputRequest, qualification: activationQualification, replay_binding_digest: digest, consumed_at: Date.parse(timestamp), command: intakeCeoCommand, grant: intakeApprovalGrant, result: activationResult };
+
+const proposedDiffDigest = (taskDigest: string, proposedMandateDigest: string) => canonicalDigest({ task_spec_digest: taskDigest, mandate_digest: proposedMandateDigest });
+
+function rebindApprovalReadiness(readiness: any): void {
+  const task = readiness.task_spec;
+  const mandate = readiness.mandate;
+  const taskDigest = canonicalDigest(task);
+  mandate.request_id = task.request_id;
+  mandate.task_spec_revision = {
+    plan_revision: task.plan_revision,
+    task_spec_digest: taskDigest,
+    objective_digest: canonicalDigest(task.objective),
+    acceptance_digest: canonicalDigest(task.acceptance_checks),
+  };
+  mandate.verification_step.acceptance_digest = canonicalDigest(task.acceptance_checks);
+  mandate.verification_step.acceptance_checks = structuredClone(task.acceptance_checks);
+  const proposedMandateDigest = canonicalDigest(mandate);
+  const request = readiness.activation.request;
+  request.task_id = mandate.task_id;
+  request.task_spec_revision = task.plan_revision;
+  request.task_spec_digest = taskDigest;
+  request.proposed_mandate_id = mandate.mandate_id;
+  request.proposed_mandate_digest = proposedMandateDigest;
+  request.proposed_diff.digest = proposedDiffDigest(taskDigest, proposedMandateDigest);
+  request.proposed_limits = structuredClone(mandate.aggregate_budget);
+  request.proposed_route_ids = task.route_plan.flatMap((phase: { route_id: string | null }) => phase.route_id === null ? [] : [phase.route_id]);
+  request.proposed_side_effects = structuredClone(mandate.capability_scope.allowed_side_effects);
+}
+
+function persistWithReadiness(input: any, readiness: any): any {
+  const rebound = { ...input, readiness };
+  return { ...rebound, card_authorization_digest: contracts.canonicalCardAuthorizationDigest(rebound) };
+}
 
 type MutationEntryFixture = { path: string; operation: "add" | "modify" | "delete"; before_digest: string | null; after_digest: string | null };
 const boundedLocalPatch = (entries: MutationEntryFixture[], diffBytes = 64) => {
@@ -335,7 +385,7 @@ const schemaFixtures: Record<string, SchemaFixture> = {
   RequiredCheckResultV1Schema: { valid: actionOutcome.required_checks[0], invalid: {} }, ActionOutcomeV1Schema: { valid: actionOutcome, invalid: {} }, TaskOutcomeV1Schema: { valid: taskOutcome, invalid: {} }, FinalizationCommandV1Schema: { valid: finalizationCommand, invalid: {} }, FinalizationPreflightV1Schema: { valid: { status: "ready", observed_digest: digest }, invalid: {} }, FinalizationApplyResultV1Schema: { valid: { status: "applied", operation_id: "command-1" }, invalid: {} }, FinalizationLookupResultV1Schema: { valid: { status: "applied", post_state_digest: digest }, invalid: {} }, ArtifactReferenceV1Schema: { valid: { artifact_id: "artifact-1", digest }, invalid: {} },
   ActionReceiptV1Schema: { valid: actionReceipt, invalid: {} }, VerificationReceiptV1Schema: { valid: verificationReceipt, invalid: {} }, FinalizationReceiptV1Schema: { valid: finalizationReceipt, invalid: {} }, AggregateReceiptV1Schema: { valid: aggregateReceipt, invalid: {} }, ReconciliationReceiptV1Schema: { valid: reconciliationReceipt, invalid: {} }, AdapterResultEnvelopeV1Schema: { valid: { schema_version: "agentdash.adapter-result-envelope/v1", envelope_id: "event-1", command_id: "command-1", adapter: "codeg", result_digest: digest, redacted_result: redacted, observed_at: timestamp }, invalid: {} }, ManagementProposalV1Schema: { valid: { schema_version: "agentdash.management-proposal/v1", proposal_id: "proposal-1", task_id: "task-1", intent: "review the work", evidence_refs: ["evidence-1"], created_at: timestamp }, invalid: {} },
   PMPresentationV1Schema: { valid: pmPresentation, invalid: {} }, NoStartReasonV1Schema: { valid: { code: "route_unavailable", message: "A required route is unavailable." }, invalid: {} }, NoStartReportV1Schema: { valid: noStartReady, invalid: {} }, IntakeReadinessV1Schema: { valid: approvalReadiness, invalid: {} },
-  PersistIntakeInputSchema: { valid: persistIntake, invalid: {} }, PersistIntakeResultSchema: { valid: { status: "created", request_digest: digest, task_id: "task-1", artifact_digest: digest, readiness: approvalReadiness }, invalid: {} }, LookupIntakeResultSchema: { valid: { status: "found", request_digest: digest, task_id: "task-1", artifact_digest: digest, readiness: approvalReadiness }, invalid: {} }, EnsureArtifactInputSchema: { valid: { task_id: "task-1", artifact_key: "artifact-key-1", kind: "task_spec", digest, payload: redacted }, invalid: {} }, EnsureArtifactResultSchema: { valid: { artifact_id: "artifact-1", created: true, digest }, invalid: {} }, ActivationResultV1Schema: { valid: activationResult, invalid: {} }, ActivateMandateInputSchema: { valid: { expected_snapshot_digest: digest, task_id: "task-1", task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest, command: ceoCommand, grant: approvalGrant, mandate: validMandate }, invalid: {} }, ActivateMandateResultSchema: { valid: { status: "activated", ...activationResult }, invalid: {} }, ActivationSnapshotV1Schema: { valid: pendingActivationSnapshot, invalid: {} }, LookupActivationByCommandResultSchema: { valid: { status: "found", result: activationResult }, invalid: {} }, PrepareActionInputSchema: { valid: { task_id: "task-1", authority: actionAuthority, command: actionCommand, command_headroom: budget, task_reserve_refs: ["receipt-verification", "receipt-finalization", "receipt-cancellation", "receipt-reconciliation"], launch_intent_digest: digest }, invalid: {} }, PreparedActionResultSchema: { valid: { run_id: "run-1", command: actionCommand, created: true }, invalid: {} }, BindWorkerSessionInputSchema: { valid: { task_id: "task-1", run_id: "run-1", command_id: "command-1", binding: codegBinding }, invalid: {} }, AppendRunEventInputSchema: { valid: { task_id: "task-1", run_id: "run-1", event_id: "event-1", digest, payload: redacted }, invalid: {} }, CloseActionInputSchema: { valid: { task_id: "task-1", run_id: "run-1", outcome: actionOutcome, receipt_digest: digest }, invalid: {} }, SetCEOInputInputSchema: { valid: { task_id: "task-1", request: ceoInputRequest, expected_revision: 1 }, invalid: {} }, TerminalIntentInputSchema: { valid: { task_id: "task-1", outcome: taskOutcome, receipt_digest: digest, expected_nonterminal: true }, invalid: {} }, MissionControlBoardV1Schema: { valid: { generated_at: timestamp, lanes: { ready: [redacted], working: [], needs_you: [], stopped: [], completed: [] }, archived_count: 0, unavailable_reason: null }, invalid: {} }, CodeGBindingV1Schema: { valid: codegBinding, invalid: {} }, CodeGEnsureResultSchema: { valid: { status: "created", binding: codegBinding }, invalid: {} }, CodeGLookupResultSchema: { valid: { status: "found", binding: codegBinding }, invalid: {} }, CodeGSnapshotV1Schema: { valid: { binding: codegBinding, terminal: false, source_commit: "a".repeat(40), source_tree: "b".repeat(40), raw: redacted }, invalid: {} }, CodeGActivityV1Schema: { valid: { cursor: "cursor-1", source_timestamp: timestamp, kind: "status", payload: redacted }, invalid: {} }, CodeGCancelResultSchema: { valid: { status: "confirmed", binding: codegBinding }, invalid: {} }, CodeGWorkspaceBindingV1Schema: { valid: { project_id: "project-1", requested_root: "C:/work", real_root: "C:/work", folder_id: "folder-1" }, invalid: {} }, ReviewedRecallV1Schema: { valid: { page_id: "page-1", page_digest: digest, excerpt: "reviewed excerpt", reviewed_at: timestamp }, invalid: {} }, ActivationDecisionV1Schema: { valid: { kind: "auto", receipt: autoActivationReceipt }, invalid: {} },
+  PersistIntakeInputSchema: { valid: persistIntake, invalid: {} }, PersistIntakeResultSchema: { valid: { status: "created", request_digest: digest, task_id: intakeTaskId, artifact_digest: digest, readiness: approvalReadiness }, invalid: {} }, LookupIntakeResultSchema: { valid: { status: "found", request_digest: digest, task_id: intakeTaskId, artifact_digest: digest, readiness: approvalReadiness }, invalid: {} }, EnsureArtifactInputSchema: { valid: { task_id: "task-1", artifact_key: "artifact-key-1", kind: "task_spec", digest, payload: redacted }, invalid: {} }, EnsureArtifactResultSchema: { valid: { artifact_id: "artifact-1", created: true, digest }, invalid: {} }, ActivationQualificationV1Schema: { valid: activationQualification, invalid: {} }, GetActivationQualificationInputSchema: { valid: { source_snapshot_digest: digest, request_digest: digest, task_id: intakeTaskId, task_spec_digest: taskSpecDigest, mandate_digest: intakeMandateDigest, approval_request_digest: canonicalDigest(intakeCeoInputRequest), budget_policy_digest: canonicalDigest(budgetPolicySnapshot) }, invalid: {} }, GetActivationQualificationResultSchema: { valid: { status: "qualified", route_registry_revision: 1, routes: approvalReadiness.route_snapshot }, invalid: {} }, ActivationResultV1Schema: { valid: activationResult, invalid: {} }, ActivateMandateInputSchema: { valid: { expected_snapshot_digest: digest, request_digest: digest, task_id: intakeTaskId, task_spec_digest: taskSpecDigest, mandate_digest: intakeMandateDigest, source_approval_request: intakeCeoInputRequest, qualification: activationQualification, command: intakeCeoCommand, grant: intakeApprovalGrant, mandate: intakeMandate }, invalid: {} }, ActivateMandateResultSchema: { valid: { status: "activated", ...activationResult }, invalid: {} }, ActivationSnapshotV1Schema: { valid: pendingActivationSnapshot, invalid: {} }, LookupActivationByCommandResultSchema: { valid: { status: "found", result: activationResult }, invalid: {} }, PrepareActionInputSchema: { valid: { task_id: "task-1", authority: actionAuthority, command: actionCommand, command_headroom: budget, task_reserve_refs: ["receipt-verification", "receipt-finalization", "receipt-cancellation", "receipt-reconciliation"], launch_intent_digest: digest }, invalid: {} }, PreparedActionResultSchema: { valid: { run_id: "run-1", command: actionCommand, created: true }, invalid: {} }, BindWorkerSessionInputSchema: { valid: { task_id: "task-1", run_id: "run-1", command_id: "command-1", binding: codegBinding }, invalid: {} }, AppendRunEventInputSchema: { valid: { task_id: "task-1", run_id: "run-1", event_id: "event-1", digest, payload: redacted }, invalid: {} }, CloseActionInputSchema: { valid: { task_id: "task-1", run_id: "run-1", outcome: actionOutcome, receipt_digest: digest }, invalid: {} }, SetCEOInputInputSchema: { valid: { task_id: "task-1", request: ceoInputRequest, expected_revision: 1 }, invalid: {} }, TerminalIntentInputSchema: { valid: { task_id: "task-1", outcome: taskOutcome, receipt_digest: digest, expected_nonterminal: true }, invalid: {} }, MissionControlBoardV1Schema: { valid: { generated_at: timestamp, lanes: { ready: [redacted], working: [], needs_you: [], stopped: [], completed: [] }, archived_count: 0, unavailable_reason: null }, invalid: {} }, CodeGBindingV1Schema: { valid: codegBinding, invalid: {} }, CodeGEnsureResultSchema: { valid: { status: "created", binding: codegBinding }, invalid: {} }, CodeGLookupResultSchema: { valid: { status: "found", binding: codegBinding }, invalid: {} }, CodeGSnapshotV1Schema: { valid: { binding: codegBinding, terminal: false, source_commit: "a".repeat(40), source_tree: "b".repeat(40), raw: redacted }, invalid: {} }, CodeGActivityV1Schema: { valid: { cursor: "cursor-1", source_timestamp: timestamp, kind: "status", payload: redacted }, invalid: {} }, CodeGCancelResultSchema: { valid: { status: "confirmed", binding: codegBinding }, invalid: {} }, CodeGWorkspaceBindingV1Schema: { valid: { project_id: "project-1", requested_root: "C:/work", real_root: "C:/work", folder_id: "folder-1" }, invalid: {} }, ReviewedRecallV1Schema: { valid: { page_id: "page-1", page_digest: digest, excerpt: "reviewed excerpt", reviewed_at: timestamp }, invalid: {} }, ActivationDecisionV1Schema: { valid: { kind: "auto", receipt: autoActivationReceipt }, invalid: {} },
 };
 
 const exportedRuntimeSchemas = Object.fromEntries(Object.entries(contracts).filter(([name, value]) => name.endsWith("Schema") && typeof (value as { safeParse?: unknown }).safeParse === "function"));
@@ -837,12 +887,20 @@ describe("mission-control contracts", () => {
     const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
     const autoTaskSpec = { ...taskSpec, risk_mode: "auto" };
     const autoMandate = structuredClone(validMandate);
+    autoMandate.task_id = intakeTaskId;
     autoMandate.task_spec_revision.task_spec_digest = canonicalDigest(autoTaskSpec);
     autoMandate.authority_source = { kind: "auto_policy_receipt", authority_id: "authority-1", binding: "materialized_at_intake" };
-    const receipt = { ...autoActivationReceipt, task_spec_digest: autoMandate.task_spec_revision.task_spec_digest, mandate_digest: canonicalDigest(autoMandate) };
+    const receipt = { ...autoActivationReceipt, task_id: intakeTaskId, task_spec_digest: autoMandate.task_spec_revision.task_spec_digest, mandate_digest: canonicalDigest(autoMandate) };
     const autoReadiness = { ...intake.readiness, kind: "auto_activated", task_spec: autoTaskSpec, mandate: autoMandate, activation: { kind: "auto", receipt } };
-    expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: autoReadiness }).success).toBe(true);
+    expect(contracts.PersistIntakeInputSchema.safeParse(persistWithReadiness(intake, autoReadiness)).success).toBe(true);
     expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...autoReadiness, activation: { kind: "auto", receipt: { ...receipt, workspace_scope: { ...workspace, path: "C:/other" } } } } }).success).toBe(false);
+    expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...autoReadiness, activation: { kind: "auto", receipt: { ...receipt, finalization_predicate: { ...receipt.finalization_predicate, max_external_mutation: true } } } } }).success).toBe(false);
+    expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...autoReadiness, activation: { kind: "auto", receipt: { ...receipt, expires_at: "2026-08-04T11:59:59.000Z" } } } }).success).toBe(false);
+    expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...autoReadiness, activation: { kind: "auto", receipt: { ...receipt, authority_id: "authority-other" } } } }).success).toBe(false);
+
+    const blockedAuto: any = { ...autoReadiness, kind: "blocked_no_start", candidate_mandate: autoMandate, no_start: { schema_version: "agentdash.no-start-report/v1", ready: false, reasons: [{ code: "graph_invalid", message: "The candidate graph is unsafe." }] }, activation: null };
+    delete blockedAuto.mandate;
+    expect(contracts.PersistIntakeInputSchema.safeParse(persistWithReadiness(intake, blockedAuto)).success).toBe(true);
   });
 
   test("requires a canonical no-change mandate manifest", () => {
@@ -926,6 +984,199 @@ describe("mission-control contracts", () => {
     expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...intake.readiness, activation: { kind: "approval_required", request: { ...ceoInputRequest, proposed_limits: budget } } } }).success).toBe(false);
     expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...intake.readiness, activation: { kind: "approval_required", request: { ...ceoInputRequest, proposed_route_ids: ["route-2", "route-1"] } } } }).success).toBe(false);
     expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: { ...intake.readiness, activation: { kind: "approval_required", request: { ...ceoInputRequest, proposed_side_effects: ["network"] } } } }).success).toBe(false);
+  });
+
+  test("rejects TaskSpec and compilation-policy merge authority when external mutation is forbidden", () => {
+    const forbiddenMerge = structuredClone(taskSpec);
+    forbiddenMerge.finalization.mutation_type = "approved_merge";
+    expect(contracts.TaskSpecV1Schema.safeParse(forbiddenMerge).success).toBe(false);
+
+    const policy = structuredClone(compilationPolicy);
+    policy.task_template.finalization.mutation_type = "approved_merge";
+    expect(contracts.CompilationPolicySnapshotV1Schema.safeParse(policy).success).toBe(false);
+  });
+
+  test("requires exactly one TaskSpec phase of each executable kind", () => {
+    const duplicateExecute = structuredClone(taskSpec);
+    duplicateExecute.route_plan.splice(1, 0, structuredClone(duplicateExecute.route_plan[0]));
+    expect(contracts.TaskSpecV1Schema.safeParse(duplicateExecute).success).toBe(false);
+  });
+
+  test("retains every TaskSpec prohibition in the mandate capability scope", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    intake.readiness.task_spec.prohibited_actions.push("exfiltration");
+    rebindApprovalReadiness(intake.readiness);
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test("binds deterministic phase executor kind positionally", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    Object.assign(intake.readiness.task_spec.route_plan[0], { deterministic: true, route_id: null });
+    Object.assign(intake.readiness.mandate.action_nodes[0], { executor_kind: "verifier", route_id: null, route_proof_id: null, route_proof_digest: null });
+    intake.readiness.route_snapshot = intake.readiness.route_snapshot.filter((route: { route_id: string }) => route.route_id !== "route-1");
+    rebindApprovalReadiness(intake.readiness);
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test("binds a routed verifier to its exact TaskSpec phase, action, and proof", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    Object.assign(intake.readiness.task_spec.route_plan[3], { name: "independent-verifier", deterministic: false, route_id: "route-1" });
+    Object.assign(intake.readiness.mandate.action_nodes[3], { executor_kind: "codeg_worker", route_id: "route-1", route_proof_id: "route-proof-1", route_proof_digest: digest });
+    Object.assign(intake.readiness.mandate.verification_step, { deterministic_verifier_id: null, route_id: "route-2", route_proof_id: "route-proof-2", route_proof_digest: digest });
+    rebindApprovalReadiness(intake.readiness);
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test("requires exact unique route-snapshot coverage with no extras", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    intake.readiness.route_snapshot.push({ ...validRoute, route_id: "route-extra", route_proof_id: "route-proof-extra" });
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test("binds readiness task identity deterministically to the canonical request digest", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    intake.readiness.task_id = "task-other";
+    intake.readiness.mandate.task_id = "task-other";
+    rebindApprovalReadiness(intake.readiness);
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test.each([
+    ["decision state", (request: any) => Object.assign(request, { decision_type: "route_change", active_mandate_id: "mandate-active" })],
+    ["completed attempts", (request: any) => { request.completed_attempt_receipt_ids = ["receipt-previous"]; }],
+    ["approval deadline", (request: any) => { request.expires_at = "2026-08-04T12:00:01.000Z"; }],
+    ["full proposed diff", (request: any) => { request.proposed_diff.digest = "b".repeat(64); }],
+  ])("rejects approval readiness with mismatched %s", (_name, mutate) => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    rebindApprovalReadiness(intake.readiness);
+    mutate(intake.readiness.activation.request);
+    expect(contracts.PersistIntakeInputSchema.safeParse(intake).success).toBe(false);
+  });
+
+  test("accepts blocked readiness with revoked exact evidence and the matching typed reason", () => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    const blocked = {
+      ...intake.readiness,
+      kind: "blocked_no_start",
+      candidate_mandate: intake.readiness.mandate,
+      no_start: { schema_version: "agentdash.no-start-report/v1", ready: false, reasons: [{ code: "route_inactive", message: "A referenced route was revoked." }] },
+      activation: null,
+    };
+    delete blocked.mandate;
+    blocked.route_snapshot[0] = { ...blocked.route_snapshot[0], status: "revoked", revocation_reason: "operator revoked" };
+    expect(contracts.PersistIntakeInputSchema.safeParse(persistWithReadiness(intake, blocked)).success).toBe(true);
+    const wrongReason = structuredClone(blocked);
+    wrongReason.no_start.reasons = [{ code: "invalid_mandate", message: "Unrelated failure." }];
+    expect(contracts.PersistIntakeInputSchema.safeParse({ ...intake, readiness: wrongReason }).success).toBe(false);
+  });
+
+  test.each([
+    ["missing", (routes: any[]) => routes.slice(1)],
+    ["duplicate", (routes: any[]) => [...routes, structuredClone(routes[0])]],
+    ["extra", (routes: any[]) => [...routes, { ...structuredClone(routes[0]), route_id: "route-extra" }]],
+  ])("rejects %s TaskSpec route evidence on a nullable blocked candidate", (_name, mutateRoutes) => {
+    const intake = structuredClone(schemaFixtures.PersistIntakeInputSchema.valid) as any;
+    rebindApprovalReadiness(intake.readiness);
+    const blocked = {
+      ...intake.readiness,
+      kind: "blocked_no_start",
+      candidate_mandate: null,
+      no_start: { schema_version: "agentdash.no-start-report/v1", ready: false, reasons: [{ code: "invalid_mandate", message: "The candidate mandate is invalid." }] },
+      activation: null,
+    };
+    delete blocked.mandate;
+    expect(contracts.IntakeReadinessV1Schema.safeParse(blocked).success).toBe(true);
+
+    blocked.route_snapshot = mutateRoutes(blocked.route_snapshot);
+    expect(contracts.IntakeReadinessV1Schema.safeParse(blocked).success).toBe(false);
+  });
+
+  test("cross-binds independently valid activation evidence into one exact envelope", () => {
+    const input = structuredClone(schemaFixtures.ActivateMandateInputSchema.valid) as any;
+    input.qualification.source_snapshot_digest = "b".repeat(64);
+    input.qualification.qualification_digest = contracts.canonicalActivationQualificationDigest(input.qualification);
+    expect(contracts.ActivateMandateInputSchema.safeParse(input).success).toBe(false);
+  });
+
+  test("requires canonical unique route ordering in an activation qualification", () => {
+    const duplicate = structuredClone(activationQualification) as any;
+    duplicate.routes.push(structuredClone(duplicate.routes[0]));
+    duplicate.route_snapshot_digest = canonicalDigest(duplicate.routes);
+    duplicate.qualification_digest = contracts.canonicalActivationQualificationDigest(duplicate);
+    expect(contracts.ActivationQualificationV1Schema.safeParse(duplicate).success).toBe(false);
+
+    const reordered = structuredClone(activationQualification) as any;
+    reordered.routes.reverse();
+    reordered.route_snapshot_digest = canonicalDigest(reordered.routes);
+    reordered.qualification_digest = contracts.canonicalActivationQualificationDigest(reordered);
+    expect(contracts.ActivationQualificationV1Schema.safeParse(reordered).success).toBe(false);
+  });
+
+  test("rejects a qualification and authority envelope whose lifetime outlives a qualified route", () => {
+    const qualification = structuredClone(activationQualification) as any;
+    qualification.routes[0].expires_at = "2026-08-04T11:59:59.000Z";
+    qualification.route_snapshot_digest = canonicalDigest(qualification.routes);
+    qualification.qualification_digest = contracts.canonicalActivationQualificationDigest(qualification);
+    expect(contracts.ActivationQualificationV1Schema.safeParse(qualification).success).toBe(false);
+
+    const input = structuredClone(schemaFixtures.ActivateMandateInputSchema.valid) as any;
+    input.qualification = qualification;
+    input.command.qualification_digest = qualification.qualification_digest;
+    input.grant.qualification_digest = qualification.qualification_digest;
+    expect(contracts.ActivateMandateInputSchema.safeParse(input).success).toBe(false);
+  });
+
+  test.each([
+    ["request digest", (qualification: any) => { qualification.request_digest = "b".repeat(64); }],
+    ["task identity", (qualification: any) => { qualification.task_id = "task-other"; }],
+    ["TaskSpec digest", (qualification: any) => { qualification.task_spec_digest = "b".repeat(64); }],
+    ["mandate identity", (qualification: any) => { qualification.mandate_id = "mandate-other"; }],
+    ["mandate digest", (qualification: any) => { qualification.mandate_digest = "b".repeat(64); }],
+    ["approval digest", (qualification: any) => { qualification.approval_request_digest = "b".repeat(64); }],
+    ["policy digest", (qualification: any) => { qualification.budget_policy_digest = "b".repeat(64); }],
+    ["exact route proof", (qualification: any) => {
+      qualification.routes[0] = { ...qualification.routes[0], route_proof_id: "route-proof-replaced", evidence_digest: "b".repeat(64) };
+      qualification.route_snapshot_digest = canonicalDigest(qualification.routes);
+    }],
+  ])("rejects mixed-valid qualified evidence: %s", (_name, mutate) => {
+    const input = structuredClone(schemaFixtures.ActivateMandateInputSchema.valid) as any;
+    mutate(input.qualification);
+    input.qualification.qualification_digest = contracts.canonicalActivationQualificationDigest(input.qualification);
+    expect(contracts.ActivateMandateInputSchema.safeParse(input).success).toBe(false);
+  });
+
+  test("cross-binds pending and active activation snapshot tuples", () => {
+    expect(contracts.ActivationSnapshotV1Schema.safeParse(activeActivationSnapshot).success).toBe(true);
+    expect(contracts.ActivationSnapshotV1Schema.safeParse({ ...pendingActivationSnapshot, request_digest: "b".repeat(64) }).success).toBe(false);
+    expect(contracts.ActivationSnapshotV1Schema.safeParse({ ...activeActivationSnapshot, source_snapshot_digest: "c".repeat(64) }).success).toBe(false);
+    expect(contracts.ActivationSnapshotV1Schema.safeParse({ ...activeActivationSnapshot, result: { ...activationResult, task_id: "task-other" } }).success).toBe(false);
+  });
+
+  test.each([
+    ["command type", (input: any) => { input.command.command_type = "cancel"; }],
+    ["requested decision", (input: any) => { input.command.requested_decision = "route_change"; }],
+    ["command task", (input: any) => { input.command.task_id = "task-other"; }],
+    ["displayed revision", (input: any) => { input.command.displayed_task_spec_revision += 1; }],
+    ["displayed TaskSpec", (input: any) => { input.command.displayed_task_spec_digest = "b".repeat(64); }],
+    ["source command", (input: any) => { input.grant.source_command_id = "command-other"; }],
+    ["grant task", (input: any) => { input.grant.task_id = "task-other"; }],
+    ["grant revision", (input: any) => { input.grant.task_spec_revision += 1; }],
+    ["grant TaskSpec", (input: any) => { input.grant.task_spec_digest = "b".repeat(64); }],
+    ["grant mandate identity", (input: any) => { input.grant.mandate_id = "mandate-other"; }],
+    ["grant mandate digest", (input: any) => { input.grant.mandate_digest = "b".repeat(64); }],
+    ["authenticated approver", (input: any) => { input.grant.approved_by = "session-other-123456789"; }],
+    ["materialization timestamp", (input: any) => { input.grant.approved_at = "2026-08-04T10:00:01.000Z"; }],
+    ["command expiry", (input: any) => { input.command.expires_at = "2026-08-04T11:59:59.000Z"; }],
+    ["source snapshot", (input: any) => { input.grant.source_snapshot_digest = "b".repeat(64); }],
+    ["qualification", (input: any) => { input.grant.qualification_digest = "b".repeat(64); }],
+    ["viewed mandate", (input: any) => { input.command.viewed_mandate_digest = "b".repeat(64); }],
+    ["proposed mandate", (input: any) => { input.command.proposed_mandate_id = "mandate-other"; }],
+    ["active mandate", (input: any) => { input.command.active_mandate_id = "mandate-active"; }],
+    ["deadline beyond mandate", (input: any) => { input.command.expires_at = "2026-08-04T12:00:01.000Z"; input.grant.expires_at = "2026-08-04T12:00:01.000Z"; }],
+  ])("rejects activation DTO mismatch: %s", (_name, mutate) => {
+    const input = structuredClone(schemaFixtures.ActivateMandateInputSchema.valid) as any;
+    mutate(input);
+    expect(contracts.ActivateMandateInputSchema.safeParse(input).success).toBe(false);
   });
 
   test("keeps reconciliation transitions within the category ceiling", () => {

@@ -167,6 +167,19 @@ describe("composed no-start proof", () => {
     expect(codes(sameHarness)).toContain("verifier_not_independent");
   });
 
+  test("checks tier-2 independence for model-backed mutation after an earlier verifier", () => {
+    const input = validFixture();
+    input.mandate.transition_graph.execute.semantic_failure = { kind: "terminal", outcome: "failed" };
+    input.mandate.transition_graph.verify.semantic_failure = { kind: "node", node_id: input.mandate.action_nodes[2].node_id };
+    input.mandate.transition_graph.remediate.succeeded = { kind: "node", node_id: input.mandate.action_nodes[3].node_id };
+    input.mandate.visit_caps.verify = 2;
+    input.mandate.edge_visit_caps["verify:semantic_failure"] = 1;
+    input.mandate.edge_visit_caps["verify:succeeded"] = 2;
+    input.routes[3].provider = input.routes[2].provider;
+
+    expect(codes(input)).toContain("verifier_not_independent");
+  });
+
   test("fails closed for mandate expiry and an invalid exact finalization action", () => {
     const expired = validFixture();
     expired.mandate.expiry = "2026-08-04T09:59:59.000Z";
@@ -175,5 +188,23 @@ describe("composed no-start proof", () => {
     const wrongFinalizer = validFixture();
     wrongFinalizer.mandate.action_nodes[4].action_role = "execute";
     expect(codes(wrongFinalizer)).toContain("finalization_invalid");
+  });
+
+  test("retains TaskSpec prohibitions in the no-start capability proof", () => {
+    const input = validFixture();
+    input.task_spec.prohibited_actions = [...input.task_spec.prohibited_actions, "No credential export."];
+    input.mandate.task_spec_revision.task_spec_digest = canonicalDigest(input.task_spec);
+
+    expect(codes(input)).toContain("capability_scope_mismatch");
+  });
+
+  test("binds deterministic TaskSpec phases to their exact controller executor kinds", () => {
+    const input = validFixture();
+    Object.assign(input.task_spec.route_plan[0], { deterministic: true, route_id: null });
+    Object.assign(input.mandate.action_nodes[0], { executor_kind: "verifier", route_id: null, route_proof_id: null, route_proof_digest: null });
+    input.routes = input.routes.filter((evidence) => evidence.route_id !== "route-execute");
+    input.mandate.task_spec_revision.task_spec_digest = canonicalDigest(input.task_spec);
+
+    expect(codes(input)).toContain("phase_binding_mismatch");
   });
 });

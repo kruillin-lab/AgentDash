@@ -9,6 +9,7 @@ import {
   canonicalDigest,
   type AutoActivationSeedV1,
   type CompilationPolicySnapshotV1,
+  type Digest,
   type ExecutionMandateV1,
   type IntakeReadinessV1,
   type PMPresentationV1,
@@ -92,21 +93,22 @@ export type CompileIntakeResult =
       request_digest: string;
       task_id: TaskId;
       task_spec: TaskSpecV1;
-      mandate: ExecutionMandateV1;
+      mandate: ExecutionMandateV1 | null;
       readiness: IntakeReadinessV1;
       artifact_digest: string;
     }
-  | { status: "clarification_required"; reasons: Array<{ code: string; message: string }> };
+  | { status: "clarification_required"; reasons: Array<{ code: string; message: string }> }
+  | { status: "intake_unavailable"; reasons: Array<{ code: string; message: string }> };
 
-function clarification(code: string, message: string): CompileIntakeResult {
-  return { status: "clarification_required", reasons: [{ code, message }] };
+function unavailable(code: string, message: string): CompileIntakeResult {
+  return { status: "intake_unavailable", reasons: [{ code, message }] };
 }
 
 export function normalizeIntakeMessage(message: string): string {
   return message.normalize("NFC").trim().replace(/\s+/gu, " ");
 }
 
-export function canonicalizeCEOIntakeRequest(rawRequest: CEOIntakeRequestV1): { request: CEOIntakeRequestV1; normalized_message: string; request_digest: string; task_id: TaskId } {
+export function canonicalizeCEOIntakeRequest(rawRequest: CEOIntakeRequestV1): { request: CEOIntakeRequestV1; normalized_message: string; request_digest: Digest; task_id: TaskId } {
   const request = CEOIntakeRequestV1Schema.parse(rawRequest);
   const normalized_message = normalizeIntakeMessage(request.message);
   if (normalized_message.length === 0 || normalized_message.length > 4_096) throw new TypeError("invalid normalized request");
@@ -122,24 +124,24 @@ function futureTimestamp(now: number, milliseconds: number): string {
 
 export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult {
   const request = CEOIntakeRequestV1Schema.safeParse(rawInput.request);
-  if (!request.success) return clarification("invalid_request", "The CEO request is invalid.");
+  if (!request.success) return unavailable("invalid_request", "The CEO request is invalid.");
   const pm = PMPresentationV1Schema.safeParse(rawInput.pm_output);
-  if (!pm.success) return clarification("invalid_pm_output", "The PM presentation is invalid.");
-  if (pm.data.proposal.intent !== "create_task") return clarification("invalid_pm_output", "Only create_task proposals can be compiled.");
+  if (!pm.success) return unavailable("invalid_pm_output", "The PM presentation is invalid.");
+  if (pm.data.proposal.intent !== "create_task") return unavailable("invalid_pm_output", "Only create_task proposals can be compiled.");
   const policy = CompilationPolicySnapshotV1Schema.safeParse(rawInput.compilation_policy);
   if (!policy.success || rawInput.compilation_policy_digest !== canonicalDigest(rawInput.compilation_policy)) {
-    return clarification("compilation_policy_mismatch", "The compilation policy is invalid or unbound.");
+    return unavailable("compilation_policy_mismatch", "The compilation policy is invalid or unbound.");
   }
   const now = Date.parse(rawInput.now);
-  if (!Number.isSafeInteger(now)) return clarification("invalid_compilation_time", "The compilation time is invalid.");
+  if (!Number.isSafeInteger(now)) return unavailable("invalid_compilation_time", "The compilation time is invalid.");
   const normalizedMessage = normalizeIntakeMessage(request.data.message);
-  if (normalizedMessage.length === 0 || normalizedMessage.length > 4_096) return clarification("invalid_request", "The normalized CEO request is invalid.");
+  if (normalizedMessage.length === 0 || normalizedMessage.length > 4_096) return unavailable("invalid_request", "The normalized CEO request is invalid.");
 
   try {
     const compilationPolicyDigest = canonicalDigest(policy.data);
     const budgetPolicyDigest = canonicalDigest(policy.data.budget_policy);
     const { request_digest: requestDigest, task_id: taskId } = canonicalizeCEOIntakeRequest(request.data);
-    const taskSpec = TaskSpecV1Schema.parse({
+    const taskSpecResult = TaskSpecV1Schema.safeParse({
       schema_version: "agentdash.task-spec/v1",
       request_id: request.data.request_id,
       title: normalizedMessage.slice(0, 256),
@@ -149,6 +151,10 @@ export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult
       plan_revision: 0,
       source_refs: [`request:${request.data.request_id}`, `policy:${compilationPolicyDigest}`],
     });
+    if (!taskSpecResult.success) {
+      return unavailable("invalid_task_spec", "The server compilation policy cannot produce a valid TaskSpec.");
+    }
+    const taskSpec = taskSpecResult.data;
     const taskSpecRevision = {
       plan_revision: taskSpec.plan_revision,
       task_spec_digest: canonicalDigest(taskSpec),
@@ -164,7 +170,21 @@ export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult
       visit_caps: policy.data.mandate_template.visit_caps,
       edge_visit_caps: policy.data.mandate_template.edge_visit_caps,
     });
-    if (graph.paths.length === 0) return clarification("invalid_graph", "The policy graph has no finite reachable path.");
+    const structuralGraphCodes = new Set([
+      "graph_complexity_exceeded",
+      "graph_structural_map_mismatch",
+      "graph_missing_outcome_edge",
+      "graph_dangling_node",
+      "graph_visit_cap_exceeded",
+      "graph_edge_cap_exceeded",
+      "graph_open_reconciliation",
+      "graph_unreachable_node",
+      "graph_unbounded_remediation",
+      "graph_cap_dead_end",
+    ]);
+    if (graph.paths.length === 0 || graph.reasons.some((reason) => structuralGraphCodes.has(reason.code))) {
+      return unavailable("invalid_graph", "The compilation policy graph is structurally invalid or cannot be expanded safely.");
+    }
     const budget = proveMandateBudget({
       paths: graph.paths,
       aggregate_budget: policy.data.mandate_template.aggregate_budget,
@@ -173,9 +193,19 @@ export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult
       claimed_task_reserves: policy.data.budget_policy.task_reserves,
       policy: policy.data.budget_policy,
     });
-    if (!budget.component_maxima) return clarification("invalid_budget", "The policy budget cannot be proven safely.");
+    const structuralBudgetCodes = new Set([
+      "budget_action_limits_unbound",
+      "budget_reserves_unbound",
+      "budget_aggregate_invalid",
+      "budget_arithmetic_overflow",
+      "budget_missing_paths",
+      "budget_unknown_node",
+    ]);
+    if (!budget.component_maxima || budget.reasons.some((reason) => structuralBudgetCodes.has(reason.code))) {
+      return unavailable("invalid_budget", "The compilation policy budget cannot be computed safely.");
+    }
     const worstPath = [...graph.paths].sort((left, right) => right.node_ids.length - left.node_ids.length || canonicalDigest(left.node_ids).localeCompare(canonicalDigest(right.node_ids)))[0];
-    const mandate = ExecutionMandateV1Schema.parse({
+    const mandateResult = ExecutionMandateV1Schema.safeParse({
       schema_version: "agentdash.execution-mandate/v1",
       mandate_id: mandateId,
       task_id: taskId,
@@ -194,63 +224,102 @@ export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult
         ? { kind: "auto_policy_receipt", authority_id: rawInput.activation.authority_id, binding: "materialized_at_intake" }
         : { kind: "approval_precommit", authority_id: approvalAuthorityId, binding: "precommitted_at_intake" },
     });
-    const noStart = runNoStartChecks({ task_spec: taskSpec, mandate, routes: policy.data.route_snapshot, budget_policy: policy.data.budget_policy, now: rawInput.now });
     const proposalDigest = canonicalDigest(pm.data.proposal);
+    if (!mandateResult.success) {
+      const noStart = {
+        schema_version: "agentdash.no-start-report/v1" as const,
+        ready: false as const,
+        reasons: [{ code: "invalid_mandate", message: "The candidate mandate is invalid." }],
+      };
+      const branch = {
+        kind: "blocked_no_start" as const,
+        task_spec: taskSpec,
+        candidate_mandate: null,
+        route_snapshot: policy.data.route_snapshot,
+        no_start: noStart,
+        activation: null,
+      };
+      const artifactDigest = canonicalIntakeArtifactDigest({
+        task_id: taskId,
+        request_digest: requestDigest,
+        pm: pm.data,
+        proposal_digest: proposalDigest,
+        compilation_policy_digest: compilationPolicyDigest,
+        budget_policy_digest: budgetPolicyDigest,
+        branch,
+      });
+      const readiness = IntakeReadinessV1Schema.parse({
+        schema_version: "agentdash.intake-readiness/v1",
+        task_id: taskId,
+        request_digest: requestDigest,
+        pm: pm.data,
+        proposal_digest: proposalDigest,
+        compilation_policy_digest: compilationPolicyDigest,
+        budget_policy_digest: budgetPolicyDigest,
+        artifact_digest: artifactDigest,
+        ...branch,
+      });
+      return { status: "compiled", normalized_message: normalizedMessage, request_digest: requestDigest, task_id: taskId, task_spec: taskSpec, mandate: null, readiness, artifact_digest: artifactDigest };
+    }
+    const mandate = mandateResult.data;
+    const noStart = runNoStartChecks({ task_spec: taskSpec, mandate, routes: policy.data.route_snapshot, budget_policy: policy.data.budget_policy, now: rawInput.now });
     const mandateDigest = canonicalDigest(mandate);
     const routeIds = taskSpec.route_plan.map((phase) => phase.route_id).filter((routeId): routeId is NonNullable<typeof routeId> => routeId !== null);
-    const activation = rawInput.activation.kind === "auto"
-      ? {
-          kind: "auto" as const,
-          receipt: AutoActivationReceiptV1Schema.parse({
-            schema_version: "agentdash.auto-activation-receipt/v1",
-            authority_id: rawInput.activation.authority_id,
-            task_id: taskId,
-            task_spec_revision: taskSpec.plan_revision,
-            task_spec_digest: taskSpecRevision.task_spec_digest,
-            mandate_id: mandate.mandate_id,
-            objective_digest: taskSpecRevision.objective_digest,
-            acceptance_digest: taskSpecRevision.acceptance_digest,
-            mandate_digest: mandateDigest,
-            ordered_route_ids: routeIds,
-            policy_version: rawInput.activation.policy_version,
-            policy_evidence_digest: rawInput.activation.policy_evidence_digest,
-            capability_scope: mandate.capability_scope,
-            capability_scope_digest: canonicalDigest(mandate.capability_scope),
-            workspace_scope: mandate.workspace_scope,
-            aggregate_budget: mandate.aggregate_budget,
-            finalization_predicate: { mutation_type: mandate.finalization_step.mutation_type, mutation_manifest_digest: mandate.finalization_step.mutation_manifest.manifest_digest, max_external_mutation: mandate.finalization_step.mutation_type === "approved_merge" },
-            issued_at: rawInput.now,
-            expires_at: mandate.expiry,
-          }),
-        }
-      : {
-          kind: "approval_required" as const,
-          request: {
-            schema_version: "agentdash.ceo-input-request/v1" as const,
-            task_id: taskId,
-            task_spec_revision: taskSpec.plan_revision,
-            task_spec_digest: taskSpecRevision.task_spec_digest,
-            active_mandate_id: null,
-            proposed_mandate_id: mandate.mandate_id,
-            proposed_mandate_digest: mandateDigest,
-            decision_type: "initial_mandate_approval" as const,
-            proposed_diff: { digest: canonicalDigest({ task_spec_digest: taskSpecRevision.task_spec_digest, mandate_digest: mandateDigest }), summary: "Activate the initial finite mandate." },
-            proposed_limits: mandate.aggregate_budget,
-            proposed_route_ids: routeIds,
-            proposed_side_effects: mandate.capability_scope.allowed_side_effects,
-            rationale: "The initial finite mandate requires authenticated CEO approval.",
-            evidence_refs: [`policy:${compilationPolicyDigest}`, `proposal:${proposalDigest}`],
-            completed_attempt_receipt_ids: [],
-            no_unapproved_action_running: true as const,
-            created_at: rawInput.now,
-            expires_at: futureTimestamp(now, policy.data.approval_request_ttl_ms),
-          },
-        };
-    const branch = noStart.ready
-      ? rawInput.activation.kind === "auto"
-        ? { kind: "auto_activated" as const, task_spec: taskSpec, mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation }
-        : { kind: "approval_required" as const, task_spec: taskSpec, mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation }
-      : { kind: "blocked_no_start" as const, task_spec: taskSpec, candidate_mandate: mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation: null };
+    let branch: IntakeArtifactBranch;
+    if (!noStart.ready) {
+      branch = { kind: "blocked_no_start", task_spec: taskSpec, candidate_mandate: mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation: null };
+    } else if (rawInput.activation.kind === "auto") {
+      const activation = {
+        kind: "auto" as const,
+        receipt: AutoActivationReceiptV1Schema.parse({
+          schema_version: "agentdash.auto-activation-receipt/v1",
+          authority_id: rawInput.activation.authority_id,
+          task_id: taskId,
+          task_spec_revision: taskSpec.plan_revision,
+          task_spec_digest: taskSpecRevision.task_spec_digest,
+          mandate_id: mandate.mandate_id,
+          objective_digest: taskSpecRevision.objective_digest,
+          acceptance_digest: taskSpecRevision.acceptance_digest,
+          mandate_digest: mandateDigest,
+          ordered_route_ids: routeIds,
+          policy_version: rawInput.activation.policy_version,
+          policy_evidence_digest: rawInput.activation.policy_evidence_digest,
+          capability_scope: mandate.capability_scope,
+          capability_scope_digest: canonicalDigest(mandate.capability_scope),
+          workspace_scope: mandate.workspace_scope,
+          aggregate_budget: mandate.aggregate_budget,
+          finalization_predicate: { mutation_type: mandate.finalization_step.mutation_type, mutation_manifest_digest: mandate.finalization_step.mutation_manifest.manifest_digest, max_external_mutation: mandate.finalization_step.mutation_type === "approved_merge" },
+          issued_at: rawInput.now,
+          expires_at: mandate.expiry,
+        }),
+      };
+      branch = { kind: "auto_activated", task_spec: taskSpec, mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation };
+    } else {
+      const activation = {
+        kind: "approval_required" as const,
+        request: {
+          schema_version: "agentdash.ceo-input-request/v1" as const,
+          task_id: taskId,
+          task_spec_revision: taskSpec.plan_revision,
+          task_spec_digest: taskSpecRevision.task_spec_digest,
+          active_mandate_id: null,
+          proposed_mandate_id: mandate.mandate_id,
+          proposed_mandate_digest: mandateDigest,
+          decision_type: "initial_mandate_approval" as const,
+          proposed_diff: { digest: canonicalDigest({ task_spec_digest: taskSpecRevision.task_spec_digest, mandate_digest: mandateDigest }), summary: "Activate the initial finite mandate." },
+          proposed_limits: mandate.aggregate_budget,
+          proposed_route_ids: routeIds,
+          proposed_side_effects: mandate.capability_scope.allowed_side_effects,
+          rationale: "The initial finite mandate requires authenticated CEO approval.",
+          evidence_refs: [`policy:${compilationPolicyDigest}`, `proposal:${proposalDigest}`],
+          completed_attempt_receipt_ids: [],
+          no_unapproved_action_running: true as const,
+          created_at: rawInput.now,
+          expires_at: futureTimestamp(now, policy.data.approval_request_ttl_ms),
+        },
+      };
+      branch = { kind: "approval_required", task_spec: taskSpec, mandate, route_snapshot: policy.data.route_snapshot, no_start: noStart, activation };
+    }
     const artifactDigest = canonicalIntakeArtifactDigest({
       task_id: taskId,
       request_digest: requestDigest,
@@ -273,6 +342,6 @@ export function compileIntake(rawInput: CompileIntakeInput): CompileIntakeResult
     });
     return { status: "compiled", normalized_message: normalizedMessage, request_digest: requestDigest, task_id: taskId, task_spec: taskSpec, mandate, readiness, artifact_digest: artifactDigest };
   } catch {
-    return clarification("unsafe_compilation", "The request cannot be compiled into a valid finite mandate.");
+    return unavailable("compiler_fault", "The intake compiler could not safely materialize an artifact.");
   }
 }

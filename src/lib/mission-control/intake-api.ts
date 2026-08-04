@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { ManagementProposalV1Schema } from "./management-proposal";
 import { CEORequestIdSchema } from "./request-id";
 
 const publicReference = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/);
@@ -12,14 +13,10 @@ export const CEOIntakeRequestV1Schema = z.object({
 }).strict();
 export type CEOIntakeRequestV1 = z.infer<typeof CEOIntakeRequestV1Schema>;
 
-const ManagementProposalV1BrowserSchema = z.object({
-  schema_version: z.literal("agentdash.management-proposal/v1"),
-  proposal_id: publicReference,
-  task_id: taskId.nullable(),
-  intent: z.enum(["conversation_only", "create_task"]),
-  evidence_refs: z.array(z.string().min(1).max(1_024)).max(32).optional(),
-  created_at: z.string().datetime({ offset: true }),
-}).strict();
+const ManagementProposalV1BrowserSchema = ManagementProposalV1Schema.superRefine((proposal, context) => {
+  if (proposal.intent !== "conversation_only" && proposal.intent !== "create_task") context.addIssue({ code: z.ZodIssueCode.custom, path: ["intent"], message: "unsupported management intent" });
+  if (proposal.task_id !== null) context.addIssue({ code: z.ZodIssueCode.custom, path: ["task_id"], message: "PM proposals cannot assign task identity" });
+});
 
 export const PMTurnOutputV1BrowserSchema = z.object({
   text: z.string().min(1).max(4_096),
@@ -62,6 +59,7 @@ export const IntakeAckV1Schema = z.object({
   } else {
     if (value.board_refresh || value.select_task_id !== null) context.addIssue({ code: z.ZodIssueCode.custom, message: "non-card acknowledgement cannot refresh or select a task" });
     if (value.result.kind === "conversation_only" && value.pm.proposal.intent !== "conversation_only") context.addIssue({ code: z.ZodIssueCode.custom, path: ["pm", "proposal", "intent"], message: "conversation acknowledgement requires conversation_only evidence" });
+    if (value.result.kind === "clarification_required" && value.pm.proposal.intent !== "create_task") context.addIssue({ code: z.ZodIssueCode.custom, path: ["pm", "proposal", "intent"], message: "clarification acknowledgement requires create_task evidence" });
   }
 });
 export type IntakeAckV1 = z.infer<typeof IntakeAckV1Schema>;

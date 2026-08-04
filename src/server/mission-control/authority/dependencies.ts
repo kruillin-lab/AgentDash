@@ -15,6 +15,9 @@ const unavailableHermesAuthority = {
   async getActivationSnapshot(): Promise<ActivationSnapshotV1> {
     throw new CEOCommandError("activation_unavailable", "Durable activation persistence is unavailable.");
   },
+  async qualifyActivation(): Promise<never> {
+    throw new CEOCommandError("activation_unavailable", "Coordinated current-route qualification is unavailable.");
+  },
   async lookupActivationByCommand(): Promise<never> {
     throw new CEOCommandError("activation_unavailable", "Durable activation persistence is unavailable.");
   },

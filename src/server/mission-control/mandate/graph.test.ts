@@ -79,6 +79,56 @@ describe("finite mandate graph validation", () => {
     expect(reasonCodes(direct)).toContain("graph_invalid_terminal_success");
   });
 
+  test("rejects terminal success from any non-succeeded finalization outcome", () => {
+    const graph = validGraph();
+    graph.transition_graph.finalize.timed_out = terminal("succeeded");
+
+    expect(reasonCodes(graph)).toContain("graph_invalid_terminal_success");
+  });
+
+  test("rejects capped backward paths that mutate after their last verification", () => {
+    const graph = validGraph();
+    graph.action_nodes.splice(1, 0,
+      { node_id: "retry", action_role: "retry", remediation_scope: null },
+      { node_id: "remediate", action_role: "remediate", remediation_scope: { finding_classes: ["failed_check"], artifact_scope: ["src"] } },
+    );
+    graph.transition_graph.retry = { ...everyOutcome(terminal()), succeeded: node("finalize") };
+    graph.transition_graph.remediate = { ...everyOutcome(terminal()), succeeded: node("retry") };
+    graph.transition_graph.verify.semantic_failure = node("remediate");
+    graph.visit_caps.retry = 1;
+    graph.visit_caps.remediate = 1;
+    for (const node_id of ["retry", "remediate"]) {
+      for (const outcome of ActionOutcomeValues) graph.edge_visit_caps[`${node_id}:${outcome}`] = 1;
+    }
+
+    expect(reasonCodes(graph)).toContain("graph_mutation_after_verification");
+  });
+
+  test("accepts a capped verify-remediate-verify path when final verification follows every mutation", () => {
+    const graph = validGraph();
+    graph.action_nodes.splice(2, 0, { node_id: "remediate", action_role: "remediate", remediation_scope: { finding_classes: ["failed_check"], artifact_scope: ["src"] } });
+    graph.transition_graph.verify.semantic_failure = node("remediate");
+    graph.transition_graph.remediate = { ...everyOutcome(terminal()), succeeded: node("verify") };
+    graph.visit_caps.verify = 2;
+    graph.visit_caps.remediate = 1;
+    for (const outcome of ActionOutcomeValues) graph.edge_visit_caps[`remediate:${outcome}`] = 1;
+
+    const result = validateMandateGraph(graph);
+    expect(result.reasons.map((reason) => reason.code)).not.toEqual(expect.arrayContaining(["graph_mutation_after_verification", "graph_invalid_success_boundary"]));
+    expect(result.paths.some((path) => path.terminal_outcome === "succeeded" && path.node_ids.join(",") === "execute,verify,remediate,verify,finalize")).toBe(true);
+  });
+
+  test("rejects an explicit verify-execute-finalize success path", () => {
+    const graph = validGraph();
+    graph.action_nodes.splice(2, 0, { node_id: "execute-after-verify", action_role: "execute", remediation_scope: null });
+    graph.transition_graph.verify.succeeded = node("execute-after-verify");
+    graph.transition_graph["execute-after-verify"] = { ...everyOutcome(terminal()), succeeded: node("finalize") };
+    graph.visit_caps["execute-after-verify"] = 1;
+    for (const outcome of ActionOutcomeValues) graph.edge_visit_caps[`execute-after-verify:${outcome}`] = 1;
+
+    expect(reasonCodes(graph)).toEqual(expect.arrayContaining(["graph_mutation_after_verification", "graph_invalid_success_boundary"]));
+  });
+
   test("fails closed before graph or state expansion can explode", () => {
     const oversized = validGraph();
     for (let index = 0; index < 70; index += 1) {

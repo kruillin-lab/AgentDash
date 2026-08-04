@@ -14,7 +14,7 @@ const secret = "command-route-test-secret-with-32-bytes-minimum";
 const now = Date.parse("2026-08-04T10:00:00.000Z");
 const issued = issueCommandSession({ secret, now: now - 1_000, ttl_ms: 60_000 });
 const publicRequest = { task_id: `task-${"a".repeat(64)}`, replay_nonce: "nonce-1234567890", displayed_task_spec_revision: 0, displayed_task_spec_digest: "b".repeat(64), proposed_mandate_id: "mandate-1", proposed_mandate_digest: "c".repeat(64), decision_type: "initial_mandate_approval" };
-const result = { schema_version: "agentdash.activation-result/v1", task_id: publicRequest.task_id, command_id: "command-1", authority_id: "authority-1", task_spec_digest: publicRequest.displayed_task_spec_digest, mandate_digest: publicRequest.proposed_mandate_digest, activated_at: "2026-08-04T10:00:00.000Z" };
+const result = { schema_version: "agentdash.activation-result/v1", task_id: publicRequest.task_id, command_id: "command-1", authority_id: "authority-1", task_spec_digest: publicRequest.displayed_task_spec_digest, mandate_digest: publicRequest.proposed_mandate_digest, source_snapshot_digest: "d".repeat(64), qualification_digest: "e".repeat(64), activated_at: "2026-08-04T10:00:00.000Z" };
 const headers = { Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007", "Content-Type": "application/json", Cookie: `${COMMAND_SESSION_COOKIE_NAME}=${issued.cookie}`, "X-AgentDash-CSRF": issued.csrf_token };
 const request = (body: unknown, extra: Record<string, string> = {}) => new Request("http://127.0.0.1:3007/api/mission-control/commands", { method: "POST", headers: { ...headers, ...extra }, body: JSON.stringify(body) });
 

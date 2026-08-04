@@ -31,6 +31,18 @@ afterEach(async () => {
 });
 
 describe("persistent nonce consumption", () => {
+  test("looks up an active replay binding without creating a missing nonce record", async () => {
+    const state_directory = await temporaryStateDirectory();
+    const nonces = createNonceStore({ state_directory, now: () => now });
+    const input = { session_id: "session-1234567890", nonce: "nonce-read-only-123", expires_at: now + 60_000, binding_digest };
+    const lookup = (nonces as typeof nonces & { lookup?: (value: typeof input) => Promise<unknown> }).lookup;
+
+    expect(lookup).toBeTypeOf("function");
+    await expect(lookup!(input)).resolves.toEqual({ status: "missing" });
+    await expect(nonces.consume(input)).resolves.toEqual({ status: "consumed", consumed_at: now });
+    await expect(lookup!(input)).resolves.toEqual({ status: "replayed_same", consumed_at: now });
+  });
+
   test("consumes a nonce once and then reports its replay", async () => {
     const state_directory = await temporaryStateDirectory();
     const nonces = createNonceStore({ state_directory, now: () => now });
