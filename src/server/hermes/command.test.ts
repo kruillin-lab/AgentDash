@@ -1,10 +1,12 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { launchDetachedCommand, runCommand } from "./command";
+import { CommandTerminationError, createCommandRunner, launchDetachedCommand, runCommand } from "./command";
 
 const executable = process.execPath;
 const allowedExecutables = [executable];
@@ -21,6 +23,109 @@ afterEach(async () => {
 });
 
 describe("runCommand", () => {
+  // Production break caught: timeout/abort/output stops used to resolve immediately after sending
+  // a direct-child signal, before either process-tree termination or the child's close event.
+  test("does not resolve a stopped command until termination is confirmed and close is observed", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      stdin: PassThrough;
+    };
+    child.pid = 4242;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    const terminateTree = vi.fn().mockResolvedValue(undefined);
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 1_000,
+      terminationForceMs: 1_000,
+    });
+    const controller = new AbortController();
+    let settled = false;
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    void pending.finally(() => { settled = true; });
+    controller.abort();
+    await vi.waitFor(() => expect(terminateTree).toHaveBeenCalled());
+
+    expect(settled).toBe(false);
+    child.emit("close", null, null);
+    await expect(pending).resolves.toMatchObject({ aborted: true });
+  });
+
+  // Production break caught: a graceful tree-stop acknowledgement without child close could be
+  // mistaken for completion instead of escalating to a bounded forced tree termination.
+  test("escalates once when graceful tree termination does not produce close", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4243, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn(async (_child: unknown, force: boolean) => {
+      if (force) queueMicrotask(() => child.emit("close", null, "SIGKILL"));
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 5,
+      terminationForceMs: 100,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
+  // Production break caught: taskkill can transiently miss a just-spawned Windows PID/tree;
+  // retrying immediately preserved the race and rejected an otherwise bounded stop.
+  test("retries transient process-tree termination failures with bounded backoff", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4245, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn()
+      .mockRejectedValueOnce(new Error("PID tree is not registered yet"))
+      .mockImplementationOnce(async () => { queueMicrotask(() => child.emit("close", null, "SIGKILL")); });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 100,
+      terminationForceMs: 100,
+      terminationAttempts: 2,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, false]);
+  });
+
+  // Production break caught: swallowed kill failures previously returned a successful-looking
+  // stopped result even though the process tree could still be using the disposable directory.
+  test("rejects with a fixed error when both process-tree termination attempts fail", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4244, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn().mockRejectedValue(new Error("kill failed: sensitive detail"));
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
   // Production break caught: a PATH-relative binary could select an attacker-controlled executable.
   test("rejects relative executable paths", async () => {
     await expect(runCommand({ executable: "node", allowedExecutables: ["node"], args: [], env: {} }))
@@ -72,12 +177,91 @@ describe("runCommand", () => {
     expect(result).toMatchObject({ code: null, timedOut: true, aborted: false });
   });
 
+  // Production break caught: killing only the direct Hermes child could let a delegated grandchild
+  // survive the timeout and mutate state after the command promise had already resolved.
+  test("confirms the complete process tree is gone before a timeout resolves", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "grandchild-survived.txt");
+    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 1_500)`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      timeoutMs: 750,
+    });
+
+    expect(result.timedOut).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("confirms the complete process tree is gone before abort resolution", async () => {
+    const directory = await temporaryDirectory();
+    const ready = join(directory, "parent-ready.txt");
+    const sentinel = join(directory, "abort-grandchild-survived.txt");
+    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      "const fs = require('node:fs')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      `fs.writeFileSync(${JSON.stringify(ready)}, 'ready')`,
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+    const controller = new AbortController();
+    const pending = runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      signal: controller.signal,
+    });
+    await expect.poll(async () => {
+      try { return await readFile(ready, "utf8"); } catch { return null; }
+    }, { timeout: 2_000 }).toBe("ready");
+
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ aborted: true });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("confirms the complete process tree is gone before output-limit resolution", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "output-grandchild-survived.txt");
+    const grandchild = `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      "process.stdout.write('x'.repeat(4_096))",
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      maxOutputBytes: 64,
+    });
+
+    expect(result.outputLimitExceeded).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   // Production break caught: unbounded model output could exhaust server memory.
   test("terminates and caps combined output", async () => {
     const result = await runCommand({
       executable,
       allowedExecutables,
-      args: ["-e", "process.stdout.write('x'.repeat(4096))"],
+      args: ["-e", "process.stdout.write('x'.repeat(4096)); setInterval(() => {}, 1_000)"],
       env: {},
       maxOutputBytes: 64,
     });

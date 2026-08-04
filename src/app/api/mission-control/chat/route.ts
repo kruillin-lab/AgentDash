@@ -9,6 +9,38 @@ import { validateLocalMissionControlAuthority } from "../../../../server/mission
 
 const REQUEST_BODY_MAX_BYTES = 64 * 1024;
 
+class RequestBodyTooLargeError extends Error {}
+
+async function readBoundedRequestBody(request: Request): Promise<string> {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > REQUEST_BODY_MAX_BYTES) {
+        void reader.cancel().catch(() => {});
+        throw new RequestBodyTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true }).decode(body);
+}
+
 function error(code: string, message: string, status: number): NextResponse {
   return NextResponse.json({ error: { code, message } }, { status });
 }
@@ -26,10 +58,16 @@ function createChatPost(dependencies: PMChatDependencies) {
       return error("request_too_large", "Chat request is too large.", 413);
     }
 
+    let body: string;
+    try {
+      body = await readBoundedRequestBody(request);
+    } catch (caught) {
+      if (caught instanceof RequestBodyTooLargeError) return error("request_too_large", "Chat request is too large.", 413);
+      return error("invalid_request", "Invalid chat request.", 400);
+    }
+
     let input: unknown;
     try {
-      const body = await request.text();
-      if (Buffer.byteLength(body, "utf8") > REQUEST_BODY_MAX_BYTES) return error("request_too_large", "Chat request is too large.", 413);
       input = PMTurnInputV1Schema.parse(JSON.parse(body) as unknown);
     } catch {
       return error("invalid_request", "Invalid chat request.", 400);

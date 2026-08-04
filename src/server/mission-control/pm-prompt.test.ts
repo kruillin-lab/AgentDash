@@ -52,7 +52,9 @@ describe("buildPMPrompt", () => {
     expect(prompt).toContain(JSON.stringify(input.message));
     expect(prompt).toContain('"intent":"conversation_only"');
     expect(prompt).toContain('"intent":"create_task"');
-    expect(prompt).toContain("Do not claim approval, authority, card creation, mutation, or dispatch");
+    expect(prompt).toContain("keys response_code and proposal");
+    expect(prompt).toContain("proposal_drafted only with intent create_task");
+    expect(prompt).not.toContain("keys text and proposal");
   });
 }
 );
