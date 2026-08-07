@@ -6,6 +6,7 @@
       "allowed_roots": [
         "C:\\Users\\kruil\\Documents\\Projects\\AgentDash"
       ],
+      "expected_real_root": "C:\\Users\\kruil\\Documents\\Projects\\AgentDash",
       "expected_folder_id": null
     }
   ]

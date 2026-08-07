@@ -10,7 +10,7 @@ import type {
   AppendRunEventInput,
   BindWorkerSessionInput,
   CloseActionInput,
-  CodeGActivityV1,
+  CodeGActivityPageResultV1,
   CodeGBindingV1,
   CodeGCancelResult,
   CodeGEnsureResult,
@@ -53,7 +53,7 @@ export type {
   AppendRunEventInput,
   BindWorkerSessionInput,
   CloseActionInput,
-  CodeGActivityV1,
+  CodeGActivityPageResultV1,
   CodeGBindingV1,
   CodeGCancelResult,
   CodeGEnsureResult,
@@ -94,7 +94,7 @@ export interface CodeGPort {
   ensureWork(command: ActionCommandV1): Promise<CodeGEnsureResult>;
   lookupByCommandKey(key: string): Promise<CodeGLookupResult>;
   getSnapshot(binding: CodeGBindingV1): Promise<CodeGSnapshotV1>;
-  activityAfter(binding: CodeGBindingV1, cursor: string | null): AsyncIterable<CodeGActivityV1>;
+  activityAfter(binding: CodeGBindingV1, cursor: string | null): Promise<CodeGActivityPageResultV1>;
   cancelExact(binding: CodeGBindingV1, reason: string): Promise<CodeGCancelResult>;
   nativeSessionUri(binding: CodeGBindingV1): Promise<string | null>;
 }

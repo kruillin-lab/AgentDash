@@ -9,6 +9,7 @@ import { CodeGWorkspaceBindingV1Schema } from "../../../lib/mission-control/cont
 const ProjectConfigSchema = z.object({
   project_id: z.string().min(1),
   allowed_roots: z.array(z.string().min(1)).min(1),
+  expected_real_root: z.string().min(1),
   expected_folder_id: z.string().regex(/^folder:[1-9]\d*$/).nullable(),
 }).strict();
 
@@ -38,16 +39,18 @@ export type WorkspaceRegistryOptions = Readonly<{
   listFolders: () => Promise<readonly CodeGFolderRecord[]>;
 }>;
 
-function isUnc(path: string): boolean {
-  return path.startsWith("\\\\") || path.startsWith("//");
-}
-
 function normalized(path: string): string {
   return win32.normalize(path).replace(/[\\/]+$/, "").toLocaleLowerCase("en-US");
 }
 
 function requireLocalAbsolute(path: string): void {
-  if (isUnc(path) || !win32.isAbsolute(path)) throw new Error("Workspace root must be an absolute local Windows path.");
+  if (path.includes("\0")
+    || !/^[A-Za-z]:[\\/]/.test(path)
+    || path.startsWith("\\\\")
+    || path.startsWith("//")
+    || path.slice(2).includes(":")) {
+    throw new Error("Workspace root must be a drive-qualified local Windows path without device or alternate-data-stream syntax.");
+  }
 }
 
 export class WorkspaceRegistry {
@@ -55,26 +58,32 @@ export class WorkspaceRegistry {
 
   constructor(private readonly options: WorkspaceRegistryOptions) {
     this.config = MissionControlProjectsConfigSchema.parse(options.config);
-    for (const project of this.config.projects) for (const root of project.allowed_roots) requireLocalAbsolute(root);
+    for (const project of this.config.projects) {
+      requireLocalAbsolute(project.expected_real_root);
+      for (const root of project.allowed_roots) requireLocalAbsolute(root);
+    }
   }
 
   async resolve(project_id: string, requested_root: string): Promise<CodeGWorkspaceBindingV1> {
     requireLocalAbsolute(requested_root);
     const project = this.config.projects.find((entry) => entry.project_id === project_id);
     if (!project) throw new Error("Workspace project is not allowlisted.");
+    if (project.expected_folder_id === null) throw new Error("Workspace requires a pinned Codeg folder identity before dispatch.");
+    if (!project.allowed_roots.some((root) => normalized(root) === normalized(requested_root))) throw new Error("Workspace real path is outside the configured lexical allowlist.");
 
     const requestedReal = await this.options.realpath(requested_root);
     requireLocalAbsolute(requestedReal);
+    if (normalized(requestedReal) !== normalized(project.expected_real_root)) throw new Error("Workspace configured real path no longer matches its pinned target.");
     const allowedReal = await Promise.all(project.allowed_roots.map(async (root) => {
       const value = await this.options.realpath(root);
       requireLocalAbsolute(value);
       return value;
     }));
-    if (!allowedReal.some((root) => normalized(root) === normalized(requestedReal))) throw new Error("Workspace real path is outside the project allowlist.");
+    if (allowedReal.some((root) => normalized(root) !== normalized(project.expected_real_root))) throw new Error("Workspace configured real path no longer matches its pinned target.");
 
     const matches: Array<{ folder: CodeGFolderRecord; real: string }> = [];
     for (const folder of await this.options.listFolders()) {
-      if (!Number.isSafeInteger(folder.id) || folder.id <= 0 || folder.parent_id !== null || folder.kind === "chat") continue;
+      if (!Number.isSafeInteger(folder.id) || folder.id <= 0 || folder.parent_id !== null || folder.kind !== "project") continue;
       requireLocalAbsolute(folder.path);
       const real = await this.options.realpath(folder.path);
       requireLocalAbsolute(real);
@@ -85,7 +94,7 @@ export class WorkspaceRegistry {
 
     const match = matches[0];
     const folderId = `folder:${match.folder.id}`;
-    if (project.expected_folder_id !== null && project.expected_folder_id !== folderId) throw new Error("Configured Codeg folder identity is stale.");
+    if (project.expected_folder_id !== folderId) throw new Error("Configured Codeg folder identity is stale.");
     return CodeGWorkspaceBindingV1Schema.parse({
       project_id,
       requested_root,
@@ -95,7 +104,12 @@ export class WorkspaceRegistry {
   }
 
   async assertCurrent(binding: CodeGWorkspaceBindingV1): Promise<void> {
-    const current = await this.resolve(binding.project_id, binding.requested_root);
+    let current: CodeGWorkspaceBindingV1;
+    try {
+      current = await this.resolve(binding.project_id, binding.requested_root);
+    } catch {
+      throw new Error("Workspace changed between approval and submission.");
+    }
     if (current.folder_id !== binding.folder_id || normalized(current.real_root) !== normalized(binding.real_root)) throw new Error("Workspace changed between approval and submission.");
   }
 }

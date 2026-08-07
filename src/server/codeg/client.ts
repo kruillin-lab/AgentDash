@@ -1,10 +1,12 @@
 import "server-only";
 
-import type { ActionCommandV1, CodeGActivityV1, CodeGBindingV1, CodeGCancelResult, CodeGEnsureResult, CodeGLookupResult, CodeGSnapshotV1, CodeGWorkspaceBindingV1 } from "../../lib/mission-control/contracts";
-import { canonicalDigest, CodeGActivityV1Schema, CodeGBindingV1Schema, CodeGSnapshotV1Schema, RedactedPayloadV1Schema } from "../../lib/mission-control/contracts";
+import { win32 } from "node:path";
+
+import type { ActionCommandV1, CodeGActivityPageResultV1, CodeGBindingV1, CodeGCancelResult, CodeGEnsureResult, CodeGLookupResult, CodeGSnapshotV1, CodeGWorkspaceBindingV1 } from "../../lib/mission-control/contracts";
+import { canonicalDigest, CodeGActivityPageResultV1Schema, CodeGActivityV1Schema, CodeGBindingV1Schema, CodeGSnapshotV1Schema, RedactedPayloadV1Schema } from "../../lib/mission-control/contracts";
 import type { CodeGPort } from "@/server/mission-control/ports";
 
-import { CodeGActivityResponseSchema, CodeGEnsureResponseSchema, CodeGLookupResponseSchema, CodeGRawBindingSchema, CodeGSnapshotResponseSchema, type CodeGRawBinding } from "./schemas";
+import { CodeGActivityResponseSchema, CodeGEnsureResponseSchema, CodeGLookupResponseSchema, CodeGRawBindingSchema, CodeGSnapshotResponseSchema, type CodeGRawBinding, type CodeGRawTask } from "./schemas";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -15,6 +17,7 @@ const SECRET_PATTERNS = [
   /\b(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[^\s,;"}]+/gi,
   /\b(?:sk|rk|pk)-(?:test_|live_)?[A-Za-z0-9_-]{12,}\b/g,
 ];
+const SENSITIVE_KEY = /(?:^|[_-])(?:authorization|cookie|credential|password|secret|token|api[_-]?key)(?:$|[_-])/i;
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -63,7 +66,7 @@ function exactLoopbackOrigin(value: string, label: string): string {
   } catch {
     throw new CodeGClientConfigurationError(`${label} must be an absolute URL.`);
   }
-  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+  if ((value !== url.origin && value !== `${url.origin}/`) || url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
     throw new CodeGClientConfigurationError(`${label} must be an exact HTTP 127.0.0.1 origin.`);
   }
   return url.origin;
@@ -93,10 +96,35 @@ function exactReference(binding: CodeGBindingV1): { workTaskId: string; runSeq: 
   return { workTaskId: binding.work_task_id, runSeq: binding.run_sequence };
 }
 
+function requireTaskMatchesBinding(task: CodeGRawTask, binding: CodeGRawBinding, expectedExternalKey?: string): void {
+  if (`work_task:${task.id}` !== binding.workTaskId
+    || `folder:${task.folder_id}` !== binding.folderId
+    || task.run_seq !== binding.runSeq
+    || (task.conversation_id === null ? null : `conversation:${task.conversation_id}`) !== binding.conversationId
+    || task.connection_id !== binding.connectionId
+    || (expectedExternalKey !== undefined && task.external_key !== expectedExternalKey)) {
+    throw new Error("Codeg task and binding identities disagree.");
+  }
+}
+
 function redactSummary(value: unknown, explicitSecrets: readonly string[]): string {
+  function sanitize(input: unknown, key?: string): unknown {
+    if (key && SENSITIVE_KEY.test(key)) return "[REDACTED]";
+    if (typeof input === "string") {
+      let redacted = input;
+      for (const secret of explicitSecrets) if (secret.length >= 6) redacted = redacted.split(secret).join("[REDACTED]");
+      for (const pattern of SECRET_PATTERNS) redacted = redacted.replace(pattern, "[REDACTED]");
+      return redacted;
+    }
+    if (Array.isArray(input)) return input.map((entry) => sanitize(entry));
+    if (input !== null && typeof input === "object") {
+      return Object.fromEntries(Object.entries(input).map(([nestedKey, nestedValue]) => [nestedKey, sanitize(nestedValue, nestedKey)]));
+    }
+    return input;
+  }
   let summary: string;
   try {
-    summary = JSON.stringify(value);
+    summary = JSON.stringify(sanitize(value));
   } catch {
     summary = "[unserializable Codeg event]";
   }
@@ -121,7 +149,7 @@ export class CodeGClient implements CodeGPort {
   constructor(private readonly options: CodeGClientOptions) {
     this.baseUrl = exactLoopbackOrigin(options.baseUrl, "Codeg base URL");
     this.origin = exactLoopbackOrigin(options.origin, "AgentDash Origin");
-    if (!options.bearerToken.trim()) throw new CodeGClientConfigurationError("Codeg bearer token is required.");
+    if (options.bearerToken.length < 16 || !/^[!-~]+$/.test(options.bearerToken)) throw new CodeGClientConfigurationError("Codeg bearer token must be a nontrivial visible-ASCII secret without whitespace.");
     if (!COMMIT.test(options.expectedBridgeCommit) || options.expectedBridgeCommit !== options.provenBridgeCommit) throw new CodeGClientConfigurationError("Codeg bridge proof does not match the expected commit.");
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
@@ -149,10 +177,43 @@ export class CodeGClient implements CodeGPort {
         cache: "no-store",
       });
       if (!response.ok) throw new CodeGHttpError(response.status);
-      const advertised = Number(response.headers.get("content-length"));
-      if (Number.isFinite(advertised) && advertised > this.maxResponseBytes) throw new Error("Codeg response exceeded the configured cap.");
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > this.maxResponseBytes) throw new Error("Codeg response exceeded the configured cap.");
+      const discardResponse = async (message: string): Promise<never> => {
+        try {
+          await response.body?.cancel(message);
+        } catch {
+          // The abort below is the final transport-level stop if cancellation races the body.
+        }
+        controller.abort();
+        throw new Error(message);
+      };
+      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+      if (contentType !== "application/json" && !contentType?.endsWith("+json")) return await discardResponse("Codeg response was not JSON.");
+      const advertisedHeader = response.headers.get("content-length");
+      if (advertisedHeader !== null) {
+        const advertised = Number(advertisedHeader);
+        if (!Number.isSafeInteger(advertised) || advertised < 0 || advertised > this.maxResponseBytes) return await discardResponse("Codeg response exceeded the configured cap.");
+      }
+      if (!response.body) return await discardResponse("Codeg response body was unavailable.");
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > this.maxResponseBytes) {
+          await reader.cancel("Codeg response exceeded the configured cap.");
+          controller.abort();
+          throw new Error("Codeg response exceeded the configured cap.");
+        }
+        chunks.push(value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
       return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } finally {
       clearTimeout(timeout);
@@ -160,7 +221,22 @@ export class CodeGClient implements CodeGPort {
   }
 
   private requireExpectedFolder(raw: CodeGRawBinding): void {
-    if (raw.folderId !== this.options.workspace.folder_id || raw.folderRealPath !== this.options.workspace.real_root) throw new CodeGWorkspaceMismatchError();
+    if (raw.folderId !== this.options.workspace.folder_id || win32.normalize(raw.folderRealPath).toLocaleLowerCase("en-US") !== win32.normalize(this.options.workspace.real_root).toLocaleLowerCase("en-US")) throw new CodeGWorkspaceMismatchError();
+  }
+
+  private requireExactBinding(raw: CodeGRawBinding, expected: CodeGBindingV1): CodeGBindingV1 {
+    this.requireExpectedFolder(raw);
+    const observed = bindingFromRaw(raw);
+    if (!observed
+      || observed.work_task_id !== expected.work_task_id
+      || observed.run_sequence !== expected.run_sequence
+      || observed.folder_id !== expected.folder_id
+      || observed.conversation_id !== expected.conversation_id
+      || observed.connection_id !== expected.connection_id
+      || observed.harness_session_id !== expected.harness_session_id) {
+      throw new Error("Codeg response did not preserve the exact task-generation binding.");
+    }
+    return observed;
   }
 
   async ensureWork(command: ActionCommandV1): Promise<CodeGEnsureResult> {
@@ -173,6 +249,7 @@ export class CodeGClient implements CodeGPort {
         title: draft.title,
         config: draft.config,
       }));
+      requireTaskMatchesBinding(raw.task, raw.binding, command.idempotency_key);
       this.requireExpectedFolder(raw.binding);
       const binding = bindingFromRaw(raw.binding);
       if (!binding) return { status: "unknown", binding: null };
@@ -187,6 +264,7 @@ export class CodeGClient implements CodeGPort {
     try {
       const raw = CodeGLookupResponseSchema.parse(await this.post("work_task_lookup_external", { externalKey: key }));
       if (raw.status === "not_found") return { status: "not_found" };
+      requireTaskMatchesBinding(raw.task, raw.binding, key);
       this.requireExpectedFolder(raw.binding);
       const binding = bindingFromRaw(raw.binding);
       return binding ? { status: "found", binding } : { status: "unknown", reason: "Codeg work task has not launched yet." };
@@ -196,33 +274,59 @@ export class CodeGClient implements CodeGPort {
   }
 
   async getSnapshot(binding: CodeGBindingV1): Promise<CodeGSnapshotV1> {
-    const raw = CodeGSnapshotResponseSchema.parse(await this.post("work_task_snapshot_exact", exactReference(binding)));
-    this.requireExpectedFolder(raw.binding);
-    const observedBinding = bindingFromRaw(raw.binding);
-    if (!observedBinding || observedBinding.work_task_id !== binding.work_task_id || observedBinding.run_sequence !== binding.run_sequence) throw new Error("Codeg snapshot did not preserve the exact task generation.");
-    const sourceCommit = raw.task.merge_commit ?? raw.task.base_sha;
-    return CodeGSnapshotV1Schema.parse({
-      binding: observedBinding,
-      terminal: TERMINAL.has(raw.task.status),
-      source_commit: sourceCommit,
-      source_tree: null,
-      raw: redactedPayload(raw, [this.options.bearerToken]),
-    });
+    try {
+      const raw = CodeGSnapshotResponseSchema.parse(await this.post("work_task_snapshot_exact", exactReference(binding)));
+      requireTaskMatchesBinding(raw.task, raw.binding);
+      const observedBinding = this.requireExactBinding(raw.binding, binding);
+      return CodeGSnapshotV1Schema.parse({
+        binding: observedBinding,
+        terminal: TERMINAL.has(raw.task.status),
+        source_commit: raw.sourceCommit,
+        source_tree: raw.sourceTree,
+        raw: redactedPayload(raw, [this.options.bearerToken]),
+      });
+    } catch (error) {
+      if (error instanceof CodeGWorkspaceMismatchError) throw error;
+      throw new Error("Codeg snapshot result is unavailable or invalid.");
+    }
   }
 
-  async *activityAfter(binding: CodeGBindingV1, cursor: string | null): AsyncIterable<CodeGActivityV1> {
+  async activityAfter(binding: CodeGBindingV1, cursor: string | null): Promise<CodeGActivityPageResultV1> {
     const afterCursor = cursor === null ? 0 : Number(cursor);
     if (!Number.isSafeInteger(afterCursor) || afterCursor < 0) throw new Error("Codeg activity cursor is invalid.");
-    const raw = CodeGActivityResponseSchema.parse(await this.post("work_task_activity_after", { ...exactReference(binding), afterCursor }));
-    this.requireExpectedFolder(raw.binding);
-    if (raw.binding.workTaskId !== binding.work_task_id || raw.binding.runSeq !== binding.run_sequence) throw new Error("Codeg activity did not preserve the exact task generation.");
-    for (const event of raw.events) {
-      yield CodeGActivityV1Schema.parse({
-        cursor: String(event.seq),
-        source_timestamp: this.now().toISOString(),
-        kind: event.type,
-        payload: redactedPayload(event, [this.options.bearerToken]),
+    try {
+      const raw = CodeGActivityResponseSchema.parse(await this.post("work_task_activity_after", { ...exactReference(binding), afterCursor }));
+      const observedBinding = this.requireExactBinding(raw.binding, binding);
+      let prior = afterCursor;
+      for (const event of raw.events) {
+        if (event.seq <= prior || (raw.binding.connectionId !== null && event.connection_id !== raw.binding.connectionId)) throw new Error("Codeg activity sequence or connection identity was invalid.");
+        prior = event.seq;
+      }
+      if (!raw.resetRequired && raw.nextCursor < prior) throw new Error("Codeg activity cursor regressed behind returned events.");
+      const observedAt = this.now().toISOString();
+      return CodeGActivityPageResultV1Schema.parse({
+        status: "ok",
+        binding: observedBinding,
+        live: raw.live,
+        reset_required: raw.resetRequired,
+        next_cursor: String(raw.nextCursor),
+        facts: {
+          runtime_ms: raw.facts.runtimeMs,
+          runtime_limit_ms: raw.facts.runtimeLimitMs,
+          context_tokens_used: raw.facts.contextTokensUsed,
+          context_window_size: raw.facts.contextWindowSize,
+          observed_cost_usd: raw.facts.observedCostUsd,
+        },
+        events: raw.events.map((event) => CodeGActivityV1Schema.parse({
+          cursor: String(event.seq),
+          observed_at: observedAt,
+          kind: event.type,
+          payload: redactedPayload(event, [this.options.bearerToken]),
+        })),
       });
+    } catch (error) {
+      if (error instanceof CodeGWorkspaceMismatchError) throw error;
+      return { status: "unknown", reason: "Codeg activity result is unavailable or ambiguous." };
     }
   }
 
@@ -237,9 +341,33 @@ export class CodeGClient implements CodeGPort {
   }
 
   async nativeSessionUri(binding: CodeGBindingV1): Promise<string | null> {
-    const raw = CodeGRawBindingSchema.parse(await this.post("work_task_native_session", exactReference(binding)));
-    this.requireExpectedFolder(raw);
-    if (raw.workTaskId !== binding.work_task_id || raw.runSeq !== binding.run_sequence) throw new Error("Codeg native session did not preserve the exact task generation.");
-    return raw.nativeUri === null ? null : new URL(raw.nativeUri, `${this.baseUrl}/`).toString();
+    try {
+      const raw = CodeGRawBindingSchema.parse(await this.post("work_task_native_session", exactReference(binding)));
+      this.requireExactBinding(raw, binding);
+      if (raw.nativeUri === null) return null;
+      const uri = new URL(raw.nativeUri, `${this.baseUrl}/`);
+      const conversationNumber = raw.conversationId === null ? null : /^conversation:([1-9]\d*)$/.exec(raw.conversationId)?.[1];
+      const keys = [...uri.searchParams.keys()].sort();
+      if (uri.origin !== this.baseUrl
+        || uri.protocol !== "http:"
+        || uri.username
+        || uri.password
+        || uri.hash
+        || uri.pathname !== "/workspace"
+        || keys.join(",") !== "agent,conversationId,folderId"
+        || uri.searchParams.getAll("folderId").length !== 1
+        || uri.searchParams.get("folderId") !== String(this.folderId)
+        || conversationNumber === null
+        || uri.searchParams.getAll("conversationId").length !== 1
+        || uri.searchParams.get("conversationId") !== conversationNumber
+        || uri.searchParams.getAll("agent").length !== 1
+        || !uri.searchParams.get("agent")) {
+        throw new Error("Codeg native session URI failed same-origin validation.");
+      }
+      return uri.toString();
+    } catch (error) {
+      if (error instanceof CodeGWorkspaceMismatchError) throw error;
+      throw new Error("Codeg native session result is unavailable or invalid.");
+    }
   }
 }

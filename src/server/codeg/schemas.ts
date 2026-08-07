@@ -65,6 +65,14 @@ export const CodeGLookupResponseSchema = z.discriminatedUnion("status", [
 export const CodeGSnapshotResponseSchema = z.object({
   binding: CodeGRawBindingSchema,
   task: CodeGRawTaskSchema,
+  sourceCommit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
+  sourceTree: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/).nullable(),
+  worktreeRealPath: z.string().min(1).nullable(),
+  changedFiles: z.array(z.object({
+    file: z.string().min(1).max(4096),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+  }).strict()).nullable(),
 }).strict();
 
 export const CodeGExecutionFactsSchema = z.object({

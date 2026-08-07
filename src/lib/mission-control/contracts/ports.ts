@@ -406,8 +406,29 @@ export const CodeGLookupResultSchema = z.discriminatedUnion("status", [
 export type CodeGLookupResult = z.infer<typeof CodeGLookupResultSchema>;
 export const CodeGSnapshotV1Schema = z.object({ binding: CodeGBindingV1Schema, terminal: z.boolean(), source_commit: GitCommitIdSchema.nullable(), source_tree: GitTreeIdSchema.nullable(), raw: RedactedPayloadV1Schema }).strict();
 export type CodeGSnapshotV1 = z.infer<typeof CodeGSnapshotV1Schema>;
-export const CodeGActivityV1Schema = z.object({ cursor: z.string().min(1), source_timestamp: TimestampSchema, kind: z.string().min(1), payload: RedactedPayloadV1Schema }).strict();
+export const CodeGActivityV1Schema = z.object({ cursor: z.string().min(1), observed_at: TimestampSchema, kind: z.string().min(1), payload: RedactedPayloadV1Schema }).strict();
 export type CodeGActivityV1 = z.infer<typeof CodeGActivityV1Schema>;
+export const CodeGExecutionFactsV1Schema = z.object({
+  runtime_ms: z.number().int().nonnegative().nullable(),
+  runtime_limit_ms: z.number().int().positive().nullable(),
+  context_tokens_used: z.number().int().nonnegative().nullable(),
+  context_window_size: z.number().int().positive().nullable(),
+  observed_cost_usd: z.number().finite().nonnegative().nullable(),
+}).strict();
+export type CodeGExecutionFactsV1 = z.infer<typeof CodeGExecutionFactsV1Schema>;
+export const CodeGActivityPageResultV1Schema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    binding: CodeGBindingV1Schema,
+    live: z.boolean(),
+    reset_required: z.boolean(),
+    next_cursor: z.string().regex(/^\d+$/),
+    facts: CodeGExecutionFactsV1Schema,
+    events: z.array(CodeGActivityV1Schema),
+  }).strict(),
+  z.object({ status: z.literal("unknown"), reason: z.string().min(1) }).strict(),
+]);
+export type CodeGActivityPageResultV1 = z.infer<typeof CodeGActivityPageResultV1Schema>;
 export const CodeGCancelResultSchema = z.object({ status: z.enum(["confirmed", "not_active", "unknown"]), binding: CodeGBindingV1Schema }).strict();
 export type CodeGCancelResult = z.infer<typeof CodeGCancelResultSchema>;
 export const CodeGWorkspaceBindingV1Schema = z.object({ project_id: ProjectIdSchema, requested_root: z.string().min(1), real_root: z.string().min(1), folder_id: FolderIdSchema }).strict();
