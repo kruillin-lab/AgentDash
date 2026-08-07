@@ -82,6 +82,7 @@ function routeEvidence(expires_at = "2026-08-20T00:00:00.000Z", route_id = "rout
     provider: "openai",
     model: "model-route-execute",
     agent_type: "worker",
+    mode: "standard",
     config_digest: canonicalDigest({ config: route_id }),
     fixture_set_version: "fixtures-v1",
     scoring_rubric_version: "rubric-v1",

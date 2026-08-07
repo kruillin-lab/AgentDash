@@ -22,6 +22,7 @@ function route(route_id: string, outer_harness: string, provider: string) {
     provider,
     model: `model-${route_id}`,
     agent_type: "worker",
+    mode: "standard",
     config_digest: digest(`config-${route_id}`),
     fixture_set_version: "fixtures-v1",
     scoring_rubric_version: "rubric-v1",

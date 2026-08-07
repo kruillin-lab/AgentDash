@@ -15,7 +15,8 @@
     "test:unit": "vitest run --config vitest.config.ts",
     "test:live": "vitest run --config vitest.config.ts --mode live",
     "test:e2e": "playwright test --config playwright.config.ts",
-    "mission-control:probe": "node scripts/mission-control/write-gate-manifest.mjs"
+    "mission-control:probe": "node scripts/mission-control/write-gate-manifest.mjs",
+    "mission-control:evaluate-route": "node scripts/mission-control/evaluate-route.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
