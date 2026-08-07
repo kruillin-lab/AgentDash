@@ -104,7 +104,7 @@ if (false) {
   const binding: import("./index").CodeGBindingV1 = {
     // @ts-expect-error a Hermes task id cannot stand in for a Work Task id
     work_task_id: TaskIdSchema.parse("task-1"),
-    // @ts-expect-error a Work Task id cannot stand in for a run id
+    // @ts-expect-error a Work Task id cannot stand in for Codeg's numeric generation
     run_sequence: contracts.WorkTaskIdSchema.parse("work-task-1"),
     // @ts-expect-error a connection id cannot stand in for a conversation id
     conversation_id: contracts.ConnectionIdSchema.parse("connection-1"),
@@ -262,7 +262,7 @@ const verificationReceipt = { schema_version: "agentdash.verification-receipt/v1
 const finalizationReceipt = { schema_version: "agentdash.finalization-receipt/v1", receipt_id: "receipt-3", task_id: "task-1", task_spec_revision: 1, task_spec_digest: digest, mandate_id: "mandate-1", mandate_digest: digest, authority_id: "authority-1", command_id: "command-1", attempt_id: 1, run_id: "run-1", verification_receipt_digest: digest, artifact_id: "artifact-1", base_digest: digest, target_digest: digest, mutation_manifest_digest: emptyManifestDigest, patch_digest: emptyMutationDigest, expected_post_state: { kind: "digest", digest }, observed_post_state: { kind: "digest", digest }, adapter_operation: "close_without_change", operation_id: "command-finalize", outcome: "applied", created_at: timestamp };
 const aggregateReceipt = { schema_version: "agentdash.aggregate-receipt/v1", receipt_id: "receipt-4", task_id: "task-1", task_spec_revision: 1, task_spec_digest: digest, mandate_id: "mandate-1", mandate_digest: digest, action_receipt_ids: ["receipt-1"], attempt_ids: [1], verification_receipt_id: "receipt-2", verification_receipt_digest: digest, finalization_receipt_id: "receipt-3", finalization_receipt_digest: digest, path_budget_usage: { cost_usd: 0.1, runtime_ms: 1_000, attempts: 1, provider_tokens: 100 }, outcome: taskOutcome, created_at: timestamp };
 const reconciliationReceipt = { schema_version: "agentdash.reconciliation-receipt/v1", receipt_id: "receipt-5", task_id: "task-1", mandate_id: "mandate-1", authority_id: "authority-1", command_id: "command-1", attempt_id: 1, run_id: "run-1", category: "dispatch_lookup", work_task_id: "work-task-1", conversation_id: "conversation-1", connection_id: "connection-1", harness_session_id: "session-1", folder_id: "folder-1", attempts_used: 1, deadline_ms: 60_000, outcome: "found", evidence_refs: ["event-1"], created_at: timestamp };
-const codegBinding = { work_task_id: "work-task-1", run_sequence: "run-1", conversation_id: "conversation-1", connection_id: "connection-1", harness_session_id: "session-1", folder_id: "folder-1" };
+const codegBinding = { work_task_id: "work-task-1", run_sequence: 1, conversation_id: "conversation-1", connection_id: "connection-1", harness_session_id: "session-1", folder_id: "folder-1" };
 
 const mandateTemplate = {
   action_nodes: validMandate.action_nodes,
@@ -798,12 +798,36 @@ describe("mission-control contracts", () => {
     ["activation digest", contracts.ActivateMandateInputSchema, { ...schemaFixtures.ActivateMandateInputSchema.valid as object, mandate_digest: "b".repeat(64) }],
     ["action task", contracts.PrepareActionInputSchema, { ...schemaFixtures.PrepareActionInputSchema.valid as object, task_id: "task-2" }],
     ["action headroom", contracts.PrepareActionInputSchema, { ...schemaFixtures.PrepareActionInputSchema.valid as object, command_headroom: { ...budget, max_cost_usd: 0.5 } }],
-    ["worker run", contracts.BindWorkerSessionInputSchema, { ...schemaFixtures.BindWorkerSessionInputSchema.valid as object, run_id: "run-2" }],
     ["action outcome task", contracts.CloseActionInputSchema, { ...schemaFixtures.CloseActionInputSchema.valid as object, task_id: "task-2" }],
     ["CEO-input task", contracts.SetCEOInputInputSchema, { ...schemaFixtures.SetCEOInputInputSchema.valid as object, task_id: "task-2" }],
     ["terminal outcome task", contracts.TerminalIntentInputSchema, { ...schemaFixtures.TerminalIntentInputSchema.valid as object, task_id: "task-2" }],
   ])("rejects a port DTO with mismatched %s binding", (_name, schema, value) => {
     expect(schema.safeParse(value).success).toBe(false);
+  });
+
+  test("preserves Hermes run identity independently from Codeg's generation", () => {
+    const value = {
+      ...schemaFixtures.BindWorkerSessionInputSchema.valid as object,
+      run_id: "run-2",
+      binding: { ...codegBinding, run_sequence: 7 },
+    };
+    expect(contracts.BindWorkerSessionInputSchema.safeParse(value).success).toBe(true);
+  });
+
+  test("accepts a queued Codeg generation before a conversation exists", () => {
+    expect(contracts.CodeGBindingV1Schema.safeParse({
+      ...codegBinding,
+      conversation_id: null,
+      connection_id: null,
+      harness_session_id: null,
+    }).success).toBe(true);
+  });
+
+  test.each([0, -1, 1.5, "run-1"])("rejects invalid Codeg generation %p", (runSequence) => {
+    expect(contracts.CodeGBindingV1Schema.safeParse({
+      ...codegBinding,
+      run_sequence: runSequence,
+    }).success).toBe(false);
   });
 
   test("binds receipt routes and route proofs to nested outcomes", () => {

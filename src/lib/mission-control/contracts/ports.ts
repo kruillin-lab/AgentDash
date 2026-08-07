@@ -375,9 +375,9 @@ export type PrepareActionInput = z.infer<typeof PrepareActionInputSchema>;
 export const PreparedActionResultSchema = z.object({ run_id: RunIdSchema, command: ActionCommandV1Schema, created: z.boolean() }).strict();
 export type PreparedActionResult = z.infer<typeof PreparedActionResultSchema>;
 
-export const CodeGBindingV1Schema = z.object({ work_task_id: WorkTaskIdSchema, run_sequence: RunIdSchema, conversation_id: CodeGConversationIdSchema, connection_id: ConnectionIdSchema.nullable(), harness_session_id: HarnessSessionIdSchema.nullable(), folder_id: FolderIdSchema }).strict();
+export const CodeGBindingV1Schema = z.object({ work_task_id: WorkTaskIdSchema, run_sequence: z.number().int().positive(), conversation_id: CodeGConversationIdSchema.nullable(), connection_id: ConnectionIdSchema.nullable(), harness_session_id: HarnessSessionIdSchema.nullable(), folder_id: FolderIdSchema }).strict();
 export type CodeGBindingV1 = z.infer<typeof CodeGBindingV1Schema>;
-export const BindWorkerSessionInputSchema = z.object({ task_id: TaskIdSchema, run_id: RunIdSchema, command_id: CommandIdSchema, binding: CodeGBindingV1Schema }).strict().superRefine((value, context) => { if (value.run_id !== value.binding.run_sequence) context.addIssue({ code: z.ZodIssueCode.custom, message: "worker binding run identity must match" }); });
+export const BindWorkerSessionInputSchema = z.object({ task_id: TaskIdSchema, run_id: RunIdSchema, command_id: CommandIdSchema, binding: CodeGBindingV1Schema }).strict();
 export type BindWorkerSessionInput = z.infer<typeof BindWorkerSessionInputSchema>;
 export const AppendRunEventInputSchema = z.object({ task_id: TaskIdSchema, run_id: RunIdSchema, event_id: EventIdSchema, digest: DigestSchema, payload: RedactedPayloadV1Schema }).strict();
 export type AppendRunEventInput = z.infer<typeof AppendRunEventInputSchema>;
