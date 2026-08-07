@@ -80,6 +80,7 @@ const readinessBase = z.object({
   pm: PMPresentationV1Schema,
   proposal_digest: DigestSchema,
   compilation_policy_digest: DigestSchema,
+  budget_policy: BudgetPolicySnapshotV1Schema,
   budget_policy_digest: DigestSchema,
   artifact_digest: DigestSchema,
 });
@@ -111,6 +112,7 @@ const intakeReadinessUnion = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 export const IntakeReadinessV1Schema = intakeReadinessUnion.superRefine((value, context) => {
+  if (value.budget_policy_digest !== canonicalDigest(value.budget_policy)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["budget_policy_digest"], message: "readiness must bind the complete sealed budget policy" });
   if (value.proposal_digest !== canonicalDigest(value.pm.proposal)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["proposal_digest"], message: "readiness must bind the canonical PM proposal" });
   if (value.task_id !== `task-${value.request_digest}`) context.addIssue({ code: z.ZodIssueCode.custom, path: ["task_id"], message: "readiness task identity must derive from the canonical request digest" });
   const mandate = value.kind === "blocked_no_start" ? value.candidate_mandate : value.mandate;

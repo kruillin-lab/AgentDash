@@ -1,0 +1,12 @@
+{
+  "schema_version": "agentdash.mission-control-projects/v1",
+  "projects": [
+    {
+      "project_id": "agentdash",
+      "allowed_roots": [
+        "C:\\Users\\kruil\\Documents\\Projects\\AgentDash"
+      ],
+      "expected_folder_id": null
+    }
+  ]
+}

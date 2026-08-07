@@ -308,6 +308,7 @@ const approvalReadiness = contracts.IntakeReadinessV1Schema.parse({
   pm: pmPresentation,
   proposal_digest: canonicalDigest(pmPresentation.proposal),
   compilation_policy_digest: canonicalDigest(compilationPolicy),
+  budget_policy: budgetPolicySnapshot,
   budget_policy_digest: canonicalDigest(budgetPolicySnapshot),
   artifact_digest: digest,
   task_spec: taskSpec,
@@ -1242,6 +1243,7 @@ describe("mission-control contracts", () => {
   });
 
   test("cross-binds pending and active activation snapshot tuples", () => {
+    expect(contracts.IntakeReadinessV1Schema.safeParse({ ...approvalReadiness, budget_policy: budgetPolicySnapshot }).success).toBe(true);
     expect(contracts.ActivationSnapshotV1Schema.safeParse(activeActivationSnapshot).success).toBe(true);
     expect(contracts.ActivationSnapshotV1Schema.safeParse({ ...pendingActivationSnapshot, request_digest: "b".repeat(64) }).success).toBe(false);
     expect(contracts.ActivationSnapshotV1Schema.safeParse({ ...activeActivationSnapshot, source_snapshot_digest: "c".repeat(64) }).success).toBe(false);
