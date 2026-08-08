@@ -20,12 +20,16 @@ import {
  * unrecognized provider code degrades to a semantic failure rather than silently earning a retry.
  */
 export const TRANSIENT_INFRASTRUCTURE_CODES = Object.freeze([
-  "codeg_unavailable",
-  "connection_reset",
-  "gateway_error",
-  "provider_overloaded",
-  "provider_rate_limited",
-  "provider_timeout",
+  // Hermes gateway taxonomy (agent/monitoring/gateway_health.py::classify_gateway_error).
+  // `auth_failed`, `invalid_config`, `startup_failed`, `platform_fatal`, and `unknown` are
+  // deliberately EXCLUDED: they are operator or semantic conditions, not retryable infrastructure.
+  "network_error",
+  "rate_limited",
+  "timeout",
+  // CodeG AppErrorCode variants (src-tauri/src/app_error.rs). `TaskExecutionFailed`,
+  // `InvalidInput`, and `NotFound` are deliberately EXCLUDED as semantic outcomes.
+  "NetworkError",
+  "ExternalCommandFailed",
 ] as const);
 
 const TRANSIENT_CODE_SET: ReadonlySet<string> = new Set(TRANSIENT_INFRASTRUCTURE_CODES);
@@ -76,8 +80,14 @@ function chooseOutcome(evidence: ActionClassificationEvidence): ActionOutcome {
   if ((terminalAt !== null && terminalAt > deadlineAt) || (terminalAt === null && Date.parse(evidence.classified_at) >= deadlineAt)) return "timed_out";
   // Only an exact allowlisted adapter/provider failure code is transient infrastructure.
   if (isTransientInfrastructureCode(evidence.adapter_terminal_code)) return "transient_infrastructure";
-  if (evidence.transport_ambiguous || terminalAt === null || evidence.adapter_terminal_code === null) return "ambiguous";
+  // `ambiguous` is reserved for genuinely UNKNOWN transport state: an explicit transport-ambiguity
+  // signal, or no adapter code at all. A KNOWN named failure code is decided evidence even when the
+  // terminal timestamp is missing, so it must not be downgraded to ambiguous and diverted onto a
+  // reconciliation path instead of remediation.
+  if (evidence.transport_ambiguous || evidence.adapter_terminal_code === null) return "ambiguous";
   if (evidence.semantic_failure || evidence.adapter_terminal_code !== "success") return "semantic_failure";
+  // Success additionally requires the authoritative terminal signal, not just a success code.
+  if (terminalAt === null) return "ambiguous";
   // A failed OR MISSING required check overrides a claim of success: an empty check set is not
   // success evidence, so it classifies as a verification failure rather than falling through.
   if (evidence.required_checks.length === 0 || evidence.required_checks.some((check) => !check.passed)) return "verification_failure";

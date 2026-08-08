@@ -34,7 +34,7 @@ function evidence(overrides: Partial<ActionClassificationEvidence> = {}): Action
 describe("action classifier", () => {
   test.each([
     ["succeeded", {}],
-    ["transient_infrastructure", { adapter_terminal_code: "provider_rate_limited", observed_terminal_at: null }],
+    ["transient_infrastructure", { adapter_terminal_code: "rate_limited", observed_terminal_at: null }],
     ["semantic_failure", { semantic_failure: true }],
     ["verification_failure", { required_checks: [{ check_id: "acceptance", passed: false, raw_result_digest: canonicalDigest({ failed: true }) }] }],
     ["policy_violation", { policy_violation: true }],
@@ -61,12 +61,11 @@ describe("action classifier", () => {
   // difficulty are semantic or verification failures." The classification is derived from the exact
   // adapter failure code, never asserted by the caller.
   test.each([
-    "codeg_unavailable",
-    "connection_reset",
-    "provider_rate_limited",
-    "provider_overloaded",
-    "provider_timeout",
-    "gateway_error",
+    "network_error",
+    "rate_limited",
+    "timeout",
+    "NetworkError",
+    "ExternalCommandFailed",
   ])("classifies the allowlisted infrastructure code %s as transient", (code) => {
     expect(classifyAction(evidence({ adapter_terminal_code: code, observed_terminal_at: null })).outcome).toBe("transient_infrastructure");
   });
@@ -77,12 +76,35 @@ describe("action classifier", () => {
     "artifact_missing",
     "model_reported_difficulty",
     "unknown_provider_code",
+    // Operator/semantic conditions from the real Hermes taxonomy are NOT retryable.
+    "auth_failed",
+    "invalid_config",
+    "platform_fatal",
+    "unknown",
+    // Semantic CodeG variants.
+    "TaskExecutionFailed",
+    "InvalidInput",
   ])("never treats the non-allowlisted failure code %s as transient", (code) => {
     expect(classifyAction(evidence({ adapter_terminal_code: code, observed_terminal_at: null })).outcome).not.toBe("transient_infrastructure");
   });
 
   test("a semantic failure code is a semantic failure even when the adapter reports a terminal signal", () => {
     expect(classifyAction(evidence({ adapter_terminal_code: "test_failed" })).outcome).toBe("semantic_failure");
+  });
+
+  // Rule 3 reserves `ambiguous` for UNKNOWN transport state: "unknown transport state remains
+  // ambiguous until bounded lookup". A KNOWN, named failure code is not unknown transport state, so
+  // a missing terminal timestamp must not downgrade it to ambiguous and send a decided semantic
+  // failure down a reconciliation path instead of remediation.
+  test("a known failure code with no terminal timestamp is a semantic failure, not ambiguous", () => {
+    expect(classifyAction(evidence({ adapter_terminal_code: "test_failed", observed_terminal_at: null })).outcome).toBe("semantic_failure");
+  });
+
+  test("genuinely unknown transport state is still ambiguous", () => {
+    // No code at all: nothing is known about the outcome.
+    expect(classifyAction(evidence({ adapter_terminal_code: null, observed_terminal_at: null })).outcome).toBe("ambiguous");
+    // An explicit transport-ambiguity signal wins even when a code is present.
+    expect(classifyAction(evidence({ adapter_terminal_code: "test_failed", transport_ambiguous: true })).outcome).toBe("ambiguous");
   });
 
   test("lets authoritative success beat a later cancellation but not an earlier confirmed cancellation", () => {
