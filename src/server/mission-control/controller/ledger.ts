@@ -65,6 +65,10 @@ export const BudgetLedger = {
 
   observe(state: BudgetLedgerState, commandId: string, observedCostUsd: number): BudgetLedgerState {
     const command = requireCommand(state, commandId);
+    // A revoked command was proven unsubmitted, so it never reached the adapter and can never accrue
+    // observed spend. Accepting spend here would let revocation release headroom while the aggregate
+    // limit was still being consumed.
+    if (command.state === "revoked") throw new Error("A revoked command cannot accrue observed spend.");
     const observed = money(observedCostUsd, "observed cost");
     if (observed < command.observed_cost_usd) throw new Error("Observed spend must be monotonic across restart.");
     if (observed > command.headroom_usd) throw new Error("Observed spend exceeds reserved command headroom.");

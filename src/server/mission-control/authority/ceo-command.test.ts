@@ -14,7 +14,12 @@ function policy() {
   const manifestDigest = canonicalDigest({ mutation_type: "no_change_close", entries: [], diff_bytes: 0, patch_digest: patchDigest });
   const acceptance_checks = ["The requested outcome is complete and verified."];
   const nodeIds = ["execute", "fallback", "remediate", "verify", "finalize"];
-  const terminal = Object.fromEntries(ActionOutcomeValues.map((outcome) => [outcome, { kind: "terminal", outcome: outcome === "cancelled" ? "cancelled" : "failed" }]));
+  // `ambiguous` routes to bounded reconciliation: technical ambiguity always follows bounded lookup
+  // rather than terminating directly.
+  const terminal = {
+    ...Object.fromEntries(ActionOutcomeValues.map((outcome) => [outcome, { kind: "terminal", outcome: outcome === "cancelled" ? "cancelled" : "failed" }])),
+    ambiguous: { kind: "reconciliation", category: "dispatch_lookup", max_attempts: 2, deadline_ms: 10_000 },
+  };
   const actionLimit = { max_cost_usd: 1, max_runtime_ms: 1_000, max_output_tokens: 100, max_provider_tokens: 200 };
   const reserve = { max_cost_usd: 1, max_runtime_ms: 500, max_attempts: 1, max_provider_tokens: 50 };
   const workspace = { project_id: "agentdash", mode: "isolated_worktree" as const, path: "C:/workspace/agentdash" };

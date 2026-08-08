@@ -89,7 +89,12 @@ function validFixture(): NoStartInput {
   const acceptanceDigest = canonicalDigest(task_spec.acceptance_checks);
   const emptyPatchDigest = canonicalDigest({ mutation_type: "no_change_close", entries: [] });
   const emptyManifestDigest = canonicalDigest({ mutation_type: "no_change_close", entries: [], diff_bytes: 0, patch_digest: emptyPatchDigest });
-  const nodeTargets = (target: unknown) => Object.fromEntries(ActionOutcomeValues.map((outcome) => [outcome, target]));
+  // Technical ambiguity must follow bounded lookup, so every node routes `ambiguous` to a bounded
+  // reconciliation target rather than straight to a terminal outcome.
+  const nodeTargets = (target: unknown) => ({
+    ...Object.fromEntries(ActionOutcomeValues.map((outcome) => [outcome, target])),
+    ambiguous: { kind: "reconciliation", category: "dispatch_lookup", max_attempts: 2, deadline_ms: 10_000 },
+  });
   const action_nodes = [
     { node_id: "execute", action_role: "execute" as const, executor_kind: "codeg_worker" as const, route_id: "route-execute", route_proof_id: routes[0].route_proof_id, route_proof_digest: routes[0].evidence_digest, remediation_scope: null },
     { node_id: "fallback", action_role: "retry" as const, executor_kind: "codeg_worker" as const, route_id: "route-fallback", route_proof_id: routes[1].route_proof_id, route_proof_digest: routes[1].evidence_digest, remediation_scope: null },

@@ -28,6 +28,18 @@ describe("budget ledger", () => {
     expect(() => BudgetLedger.revokeUnsubmitted(BudgetLedger.markSubmitted(reserved, "command-1"), "command-1")).toThrow(/submitted/i);
   });
 
+  // "Only a command proven unsubmitted may be revoked" — such a command never reached the adapter,
+  // so it can never accrue observed spend afterwards. Allowing it would let revocation release
+  // headroom while spend still climbed against the aggregate limit.
+  test("refuses to accrue observed spend on a proven-unsubmitted revoked command", () => {
+    const ledger = BudgetLedger.create({ aggregate_limit_usd: 10, task_reserves_usd: 2 });
+    const reserved = BudgetLedger.reserve(ledger, { command_id: "command-1", headroom_usd: 3 });
+    const revoked = BudgetLedger.revokeUnsubmitted(reserved, "command-1");
+
+    expect(() => BudgetLedger.observe(revoked, "command-1", 0.5)).toThrow(/revoked/i);
+    expect(() => BudgetLedger.settle(revoked, "command-1", { observed_cost_usd: 0.5, terminal: true })).toThrow(/revoked/i);
+  });
+
   test("rejects reservations that exceed aggregate remaining authority", () => {
     const ledger = BudgetLedger.create({ aggregate_limit_usd: 5, task_reserves_usd: 2 });
     expect(() => BudgetLedger.reserve(ledger, { command_id: "command-1", headroom_usd: 4 })).toThrow(/budget/i);

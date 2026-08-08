@@ -97,6 +97,12 @@ export function validateMandateGraph(input: MandateGraphInput): MandateGraphVali
       if (target.kind === "terminal" && target.outcome === "succeeded" && (node.action_role !== "finalize" || outcome !== "succeeded")) {
         addReason(reasons, "graph_invalid_terminal_success", "Only the exact succeeded outcome of finalization may transition to terminal success.");
       }
+      // Technical ambiguity always follows bounded lookup, reattachment, cancellation, or quarantine:
+      // an ambiguous outcome is reconciled to a numeric deadline before it may terminate. Jumping
+      // straight to a terminal leaf would decide an uncertain external effect without reconciling it.
+      if (outcome === "ambiguous" && target.kind !== "reconciliation") {
+        addReason(reasons, "graph_unbounded_ambiguity", "An ambiguous outcome must route to a bounded reconciliation target.");
+      }
     }
   }
   const suppliedEdges = Object.keys(input.edge_visit_caps);

@@ -5,6 +5,9 @@ import { validateMandateGraph, type MandateGraphInput } from "./graph";
 
 const terminal = (outcome: "succeeded" | "failed" = "failed") => ({ kind: "terminal" as const, outcome });
 const node = (node_id: string) => ({ kind: "node" as const, node_id });
+// Technical ambiguity must follow bounded lookup, so a compliant graph routes `ambiguous` to a
+// bounded reconciliation target rather than straight to a terminal outcome.
+const reconcile = () => ({ kind: "reconciliation" as const, category: "dispatch_lookup" as const, max_attempts: 6, deadline_ms: 60_000 });
 const everyOutcome = (target: ReturnType<typeof terminal> | ReturnType<typeof node>) => Object.fromEntries(ActionOutcomeValues.map((outcome) => [outcome, target]));
 
 function validGraph(): MandateGraphInput {
@@ -14,9 +17,9 @@ function validGraph(): MandateGraphInput {
   return {
     action_nodes: [execute, verify, finalize],
     transition_graph: {
-      execute: { ...everyOutcome(terminal()), succeeded: node("verify") },
-      verify: { ...everyOutcome(terminal()), succeeded: node("finalize") },
-      finalize: { ...everyOutcome(terminal()), succeeded: terminal("succeeded") },
+      execute: { ...everyOutcome(terminal()), ambiguous: reconcile(), succeeded: node("verify") },
+      verify: { ...everyOutcome(terminal()), ambiguous: reconcile(), succeeded: node("finalize") },
+      finalize: { ...everyOutcome(terminal()), ambiguous: reconcile(), succeeded: terminal("succeeded") },
     },
     visit_caps: { execute: 1, verify: 1, finalize: 1 },
     edge_visit_caps: Object.fromEntries([execute, verify, finalize].flatMap(({ node_id }) => ActionOutcomeValues.map((outcome) => [`${node_id}:${outcome}`, 1]))),
@@ -140,5 +143,19 @@ describe("finite mandate graph validation", () => {
     }
 
     expect(reasonCodes(oversized)).toContain("graph_complexity_exceeded");
+  });
+
+  // "Technical ambiguity always follows bounded lookup, reattachment, cancellation, or quarantine",
+  // and an ambiguous mutating call must be reconciled "until a numeric deadline; then terminate as
+  // `inconsistent`". An ambiguous outcome may therefore not jump straight to a terminal leaf.
+  test("rejects an ambiguous outcome that skips bounded reconciliation", () => {
+    const input = validGraph();
+    input.transition_graph.execute.ambiguous = terminal();
+
+    expect(reasonCodes(input)).toContain("graph_unbounded_ambiguity");
+  });
+
+  test("accepts an ambiguous outcome routed to a bounded reconciliation target", () => {
+    expect(reasonCodes(validGraph())).not.toContain("graph_unbounded_ambiguity");
   });
 });
