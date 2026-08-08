@@ -26,7 +26,6 @@ function evidence(overrides: Partial<ActionClassificationEvidence> = {}): Action
     route_available: true,
     ceo_input_required: false,
     transport_ambiguous: false,
-    transient_infrastructure: false,
     semantic_failure: false,
     ...overrides,
   };
@@ -35,7 +34,7 @@ function evidence(overrides: Partial<ActionClassificationEvidence> = {}): Action
 describe("action classifier", () => {
   test.each([
     ["succeeded", {}],
-    ["transient_infrastructure", { adapter_terminal_code: null, observed_terminal_at: null, transient_infrastructure: true }],
+    ["transient_infrastructure", { adapter_terminal_code: "provider_rate_limited", observed_terminal_at: null }],
     ["semantic_failure", { semantic_failure: true }],
     ["verification_failure", { required_checks: [{ check_id: "acceptance", passed: false, raw_result_digest: canonicalDigest({ failed: true }) }] }],
     ["policy_violation", { policy_violation: true }],
@@ -55,6 +54,35 @@ describe("action classifier", () => {
   // classifier itself must not return `succeeded`, independently of the schema's own guard.
   test("treats a missing required check as verification failure, never success", () => {
     expect(classifyAction(evidence({ required_checks: [] })).outcome).toBe("verification_failure");
+  });
+
+  // Spec evidence precedence rule 4: "Only an allowlisted adapter/provider failure code is
+  // transient_infrastructure. Test failure, rejected output, missing artifact, and model-reported
+  // difficulty are semantic or verification failures." The classification is derived from the exact
+  // adapter failure code, never asserted by the caller.
+  test.each([
+    "codeg_unavailable",
+    "connection_reset",
+    "provider_rate_limited",
+    "provider_overloaded",
+    "provider_timeout",
+    "gateway_error",
+  ])("classifies the allowlisted infrastructure code %s as transient", (code) => {
+    expect(classifyAction(evidence({ adapter_terminal_code: code, observed_terminal_at: null })).outcome).toBe("transient_infrastructure");
+  });
+
+  test.each([
+    "test_failed",
+    "output_rejected",
+    "artifact_missing",
+    "model_reported_difficulty",
+    "unknown_provider_code",
+  ])("never treats the non-allowlisted failure code %s as transient", (code) => {
+    expect(classifyAction(evidence({ adapter_terminal_code: code, observed_terminal_at: null })).outcome).not.toBe("transient_infrastructure");
+  });
+
+  test("a semantic failure code is a semantic failure even when the adapter reports a terminal signal", () => {
+    expect(classifyAction(evidence({ adapter_terminal_code: "test_failed" })).outcome).toBe("semantic_failure");
   });
 
   test("lets authoritative success beat a later cancellation but not an earlier confirmed cancellation", () => {

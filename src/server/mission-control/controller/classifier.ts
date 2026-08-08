@@ -12,6 +12,29 @@ import {
   type RouteProofId,
 } from "../../../lib/mission-control/contracts";
 
+/**
+ * The closed allowlist of adapter/provider failure codes that may be classified as
+ * `transient_infrastructure`. Evidence precedence rule 4 permits only an allowlisted code; test
+ * failure, rejected output, missing artifact, and model-reported difficulty are semantic or
+ * verification failures. Membership is exact — never a prefix or substring match — so a new or
+ * unrecognized provider code degrades to a semantic failure rather than silently earning a retry.
+ */
+export const TRANSIENT_INFRASTRUCTURE_CODES = Object.freeze([
+  "codeg_unavailable",
+  "connection_reset",
+  "gateway_error",
+  "provider_overloaded",
+  "provider_rate_limited",
+  "provider_timeout",
+] as const);
+
+const TRANSIENT_CODE_SET: ReadonlySet<string> = new Set(TRANSIENT_INFRASTRUCTURE_CODES);
+
+/** True only for an exact allowlisted infrastructure failure code. */
+export function isTransientInfrastructureCode(code: string | null): boolean {
+  return code !== null && TRANSIENT_CODE_SET.has(code);
+}
+
 export interface ActionClassificationEvidence {
   command_id: string;
   attempt_id: number;
@@ -34,7 +57,9 @@ export interface ActionClassificationEvidence {
   route_available: boolean;
   ceo_input_required: boolean;
   transport_ambiguous: boolean;
-  transient_infrastructure: boolean;
+  // NOTE: there is deliberately no caller-supplied `transient_infrastructure` flag. That outcome is
+  // derived from `adapter_terminal_code` against TRANSIENT_INFRASTRUCTURE_CODES, so an adapter or
+  // worker cannot declare its own failure retryable.
   semantic_failure: boolean;
 }
 
@@ -49,7 +74,8 @@ function chooseOutcome(evidence: ActionClassificationEvidence): ActionOutcome {
   const deadlineAt = Date.parse(evidence.deadline_at);
   if (cancellationAt !== null && cancellationAt <= deadlineAt && (terminalAt === null || cancellationAt <= terminalAt)) return "cancelled";
   if ((terminalAt !== null && terminalAt > deadlineAt) || (terminalAt === null && Date.parse(evidence.classified_at) >= deadlineAt)) return "timed_out";
-  if (evidence.transient_infrastructure) return "transient_infrastructure";
+  // Only an exact allowlisted adapter/provider failure code is transient infrastructure.
+  if (isTransientInfrastructureCode(evidence.adapter_terminal_code)) return "transient_infrastructure";
   if (evidence.transport_ambiguous || terminalAt === null || evidence.adapter_terminal_code === null) return "ambiguous";
   if (evidence.semantic_failure || evidence.adapter_terminal_code !== "success") return "semantic_failure";
   // A failed OR MISSING required check overrides a claim of success: an empty check set is not
