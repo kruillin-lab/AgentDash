@@ -361,6 +361,84 @@ describe("HermesKanbanAdapter", () => {
     expect(board.archived_count).toBe(1);
   });
 
+  // "Any nonzero exit, missing/truncated/multiple output, request/operation mismatch, invalid digest,
+  // or malformed envelope is transport `unknown`; only a matching zero-exit `not_found` response is
+  // authoritative absence." Each of these must therefore THROW rather than resolve to an absence a
+  // caller could mistake for a definitive "the record does not exist".
+  describe("classifies every transport failure as unknown, never a retryable absence", () => {
+    function failing(overrides: Record<string, unknown>) {
+      const runner = vi.fn(async (command: CommandOptions) => {
+        const request = JSON.parse(command.stdin ?? "null");
+        const result = { found: false, request_id: request.request_id };
+        return {
+          stdout: JSON.stringify({ protocol: "hermes-kanban-controller/1", request_id: request.request_id, operation: request.operation, ok: true, result_digest: canonicalDigest(result), result, error: null, observed_at: observedAt }),
+          stderr: "",
+          code: 0,
+          signal: null,
+          timedOut: false,
+          aborted: false,
+          outputLimitExceeded: false,
+          ...overrides,
+        };
+      });
+      return new HermesKanbanAdapter({
+        executable: "C:\\trusted\\hermes-kanban-controller.exe",
+        expectedExecutableSha256: executableSha256,
+        cwd: "C:\\trusted",
+        boardId: "123e4567-e89b-12d3-a456-426614174000",
+        capability: { capabilityId: "capability_00001", generation: 1, token: "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg" },
+        readExecutable: async () => executableBytes,
+        runner,
+      });
+    }
+
+    test.each([
+      ["a nonzero exit", { code: 1 }],
+      ["a killing signal", { signal: "SIGKILL" }],
+      ["a timeout", { timedOut: true }],
+      ["an abort", { aborted: true }],
+      ["an exceeded output limit", { outputLimitExceeded: true }],
+      ["any stderr output", { stderr: "warning: slow" }],
+      ["empty stdout", { stdout: "" }],
+      ["truncated stdout", { stdout: '{"protocol":"hermes-kanban-controller/1"' }],
+      ["multiple documents", { stdout: '{"a":1}{"b":2}' }],
+    ])("rejects %s instead of reporting absence", async (_label, overrides) => {
+      // The underlying payload is a well-formed `found: false`, so a fail-open implementation would
+      // return { status: "not_found" } here.
+      await expect(failing(overrides).lookupIntake("request-1")).rejects.toThrow();
+    });
+
+    test("rejects a response whose request identity does not match the request", async () => {
+      const runner = vi.fn(async () => {
+        const result = { found: false, request_id: "request-1" };
+        return { stdout: JSON.stringify({ protocol: "hermes-kanban-controller/1", request_id: "some-other-request", operation: "intake-lookup", ok: true, result_digest: canonicalDigest(result), result, error: null, observed_at: observedAt }), stderr: "", code: 0, signal: null, timedOut: false, aborted: false, outputLimitExceeded: false };
+      });
+      const adapter = new HermesKanbanAdapter({ executable: "C:\\trusted\\hermes-kanban-controller.exe", expectedExecutableSha256: executableSha256, cwd: "C:\\trusted", boardId: "123e4567-e89b-12d3-a456-426614174000", capability: { capabilityId: "capability_00001", generation: 1, token: "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg" }, readExecutable: async () => executableBytes, runner });
+
+      await expect(adapter.lookupIntake("request-1")).rejects.toThrow(/different request/i);
+    });
+
+    test("rejects a result whose digest does not bind the payload", async () => {
+      const { adapter } = options(() => ({ found: false, request_id: "request-1" }));
+      // Re-wrap the runner so the digest no longer matches the result it claims to bind.
+      const broken = new HermesKanbanAdapter({
+        ...(adapter as unknown as { options: ConstructorParameters<typeof HermesKanbanAdapter>[0] }).options,
+        readExecutable: async () => executableBytes,
+        runner: async (command: CommandOptions) => {
+          const request = JSON.parse(command.stdin ?? "null");
+          return { stdout: JSON.stringify({ protocol: "hermes-kanban-controller/1", request_id: request.request_id, operation: request.operation, ok: true, result_digest: "f".repeat(64), result: { found: false, request_id: "request-1" }, error: null, observed_at: observedAt }), stderr: "", code: 0, signal: null, timedOut: false, aborted: false, outputLimitExceeded: false };
+        },
+      });
+
+      await expect(broken.lookupIntake("request-1")).rejects.toThrow(/digest/i);
+    });
+
+    test("still reports authoritative absence for a clean zero-exit found:false response", async () => {
+      const { adapter } = options(() => ({ found: false, request_id: "request-1" }));
+      await expect(adapter.lookupIntake("request-1")).resolves.toEqual({ status: "not_found" });
+    });
+  });
+
   test("refuses an executable whose current bytes no longer match the reviewed launcher", async () => {
     const { adapter } = options(() => ({ found: false, request_id: "request-1" }));
     (adapter as any).readExecutable = async () => Buffer.from("replaced launcher");
