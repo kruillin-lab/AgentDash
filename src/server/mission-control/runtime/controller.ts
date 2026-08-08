@@ -1,10 +1,11 @@
 import "server-only";
 
-import type { ExactRouteV1, FinalizationCommandV1 } from "../../../lib/mission-control/contracts";
+import type { ExactRouteV1, FinalizationCommandV1, ReconciliationDeadlinesV1 } from "../../../lib/mission-control/contracts";
 import { chooseContinuation, type ContinuationDecisionV1, type ContinuationInput } from "../controller/continuation";
 import { buildFinalizationCommand, type BuildFinalizationCommandInput } from "../finalization/command";
 import { proveVerifierIndependence, type IndependenceTier, type VerifierCandidate, type VerifierIndependenceProof } from "../verification/independence";
 import type { ActionCommandAdvanceResult } from "./action-command";
+import { Reconciler, type ReconciliationDecisionV1, type ReconciliationRecord } from "./reconciler";
 import {
   DispatchModeSchema,
   gateDecision,
@@ -112,5 +113,15 @@ export class MissionControlController {
    */
   buildFinalizationCommand(input: BuildFinalizationCommandInput): FinalizationCommandV1 {
     return buildFinalizationCommand(input);
+  }
+
+  /**
+   * Deterministically advance a bounded reconciliation. Pure: while a record is
+   * unresolved no new work may start, and when its numeric deadline or
+   * observation budget expires the task terminalizes `inconsistent` — never a
+   * false resolution. The durable `started_at` survives restart.
+   */
+  reconcileTask(now: string, record: ReconciliationRecord, limits: ReconciliationDeadlinesV1): ReconciliationDecisionV1 {
+    return Reconciler.tick(now, record, limits);
   }
 }

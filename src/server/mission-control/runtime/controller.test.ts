@@ -136,3 +136,22 @@ describe("MissionControlController continuation", () => {
     expect(decision.kind).not.toBe("request_ceo_input");
   });
 });
+
+describe("MissionControlController reconciliation", () => {
+  const limits = {
+    dispatch_lookup: { max_attempts: 6, deadline_ms: 60_000 },
+    cancel_confirmation: { max_attempts: 6, deadline_ms: 60_000 },
+    orphan_recovery: { max_attempts: 12, deadline_ms: 120_000 },
+    finalization: { max_attempts: 6, deadline_ms: 60_000 },
+    receipt_delivery: { max_attempts: 12, deadline_ms: 120_000 },
+  };
+
+  test("reconcileTask terminalizes inconsistent on deadline expiry and blocks new work", async () => {
+    const root = await stateRoot();
+    const controller = new MissionControlController({ mode: "disabled", ...runtime(root) });
+
+    const decision = controller.reconcileTask("2026-08-06T12:01:01.000Z", { category: "dispatch_lookup", started_at: "2026-08-06T12:00:00.000Z", attempts_used: 1, resolution: null }, limits);
+
+    expect(decision).toMatchObject({ terminal: "inconsistent", allow_new_work: false });
+  });
+});
