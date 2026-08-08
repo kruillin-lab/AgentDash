@@ -100,3 +100,19 @@ Independent verification is path-specific. The verifier query excludes every
 provider and every outer harness that performed a mutation on the realized
 success path. If no qualified independent route remains, the task must not
 claim verified success.
+
+## Promoting dispatch
+
+Dispatch stays `disabled` until every gate proves out against the exact
+committed candidates. `npm run mission-control:probe` (or
+`scripts/mission-control/refresh-gates.mjs`) re-runs the proofs and writes a
+fresh digest-addressed gate snapshot below `AGENTDASH_STATE_DIR/evidence`.
+
+`scripts/mission-control/promote-gates.mjs --evidence=<snapshot> --mode=<mode>`
+evaluates the full conjunction: every gate must have a current `pass` proof
+with a well-formed evidence digest and a known external commit, and the
+snapshot's own dispatch status must be `go`. A partial conjunction, a malformed
+digest, an unknown commit, or a missing snapshot is always NO-GO. Promotion is
+a compare-and-set from the current mode and applies only with the explicit
+`--promote` operator action; without it the script is a dry run. The script
+never manufactures evidence and never promotes a partial conjunction.
