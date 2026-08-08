@@ -101,7 +101,7 @@ export function redactOperatorCommand(command) {
 }
 
 export function buildPromotionManifest(input) {
-  const { snapshot, target_mode, current_mode, operator_command, qualification_receipts, now } = input ?? {};
+  const { snapshot, target_mode, current_mode, operator_command, qualification_receipts, auto_qualification, now } = input ?? {};
 
   const evaluation = evaluatePromotion(snapshot, target_mode, Date.parse(now));
   if (!evaluation.ready) {
@@ -152,6 +152,26 @@ export function buildPromotionManifest(input) {
     };
   });
 
+  // Auto activation is a SEPARATE authority step: enabling model-backed dispatch
+  // never enables auto by itself. It requires its own complete harmless
+  // qualification path for an exact route/task-class whose auto predicate is
+  // satisfied, so it is off unless that proof is supplied.
+  let autoActivation = { enabled: false, route_id: null, task_class: null, receipt_digest: null, reason: "Auto activation requires a separate proven auto-qualification path." };
+  if (auto_qualification) {
+    if (target_mode !== "enabled") throw new Error("Auto activation cannot be enabled for a mode below enabled.");
+    const receipt = auto_qualification.receipt ?? {};
+    if (!SHA256.test(receipt.digest ?? "")) throw new Error("The auto-qualification receipt must carry a canonical digest.");
+    if (typeof receipt.route_id !== "string" || typeof receipt.task_class !== "string") {
+      throw new Error("Auto activation requires the exact route and task class it was proven for.");
+    }
+    const eligibility = auto_qualification.auto_eligibility ?? {};
+    if (eligibility.eligible !== true) {
+      const why = Array.isArray(eligibility.reasons) && eligibility.reasons.length > 0 ? eligibility.reasons.join("; ") : "no eligibility snapshot";
+      throw new Error(`Auto activation requires a satisfied auto predicate; it is not eligible: ${why}`);
+    }
+    autoActivation = { enabled: true, route_id: receipt.route_id, task_class: receipt.task_class, receipt_digest: receipt.digest, reason: "A separate auto-qualification path satisfied every auto predicate." };
+  }
+
   const body = {
     schema_version: "agentdash.promotion-manifest/v1",
     current_mode,
@@ -159,6 +179,7 @@ export function buildPromotionManifest(input) {
     operator_command: redactOperatorCommand(operator_command),
     gate_evidence: gateEvidence,
     qualification_receipts: boundReceipts,
+    auto_activation: autoActivation,
     snapshot_digest: evaluation.manifest_digest,
     created_at: now,
     // Expiry is the snapshot's own earliest proof expiry; promotion never
@@ -249,7 +270,7 @@ export async function commitDispatchMode(stateDir, manifest, expectedCurrentMode
 }
 
 async function writeDispatchRecords(dir, manifest) {
-  const record = { schema_version: "agentdash.dispatch-mode/v1", mode: manifest.target_mode, manifest_digest: manifest.manifest_digest, promoted_at: manifest.created_at, expires_at: manifest.expires_at };
+  const record = { schema_version: "agentdash.dispatch-mode/v1", mode: manifest.target_mode, auto_activation_enabled: manifest.auto_activation.enabled === true, manifest_digest: manifest.manifest_digest, promoted_at: manifest.created_at, expires_at: manifest.expires_at };
   const temporary = join(dir, `mode.${manifest.manifest_digest.slice(0, 16)}.tmp`);
   const handle = await open(temporary, "w", 0o600);
   try {

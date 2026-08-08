@@ -593,3 +593,52 @@ test("the CLI runs end to end and reports its dry-run transition", async () => {
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Auto is a SEPARATE authority step.
+//
+// "Enable `enabled` only after that qualification receipt and every gate validate.
+//  Enable auto only after a separate complete harmless qualification path for an
+//  exact route/task-class also satisfies every auto predicate and aggregate bound."
+//
+// So enabling model-backed dispatch must never, by itself, enable auto activation.
+// ---------------------------------------------------------------------------
+
+test("promoting to enabled does not enable auto activation", () => {
+  const manifest = buildPromotionManifest(manifestInput({ target_mode: "enabled" }));
+  // Auto is off unless its own separate qualification path was proven.
+  assert.equal(manifest.auto_activation.enabled, false);
+  assert.match(manifest.auto_activation.reason, /separate|not proven|auto/i);
+});
+
+test("auto activation requires its own qualification receipt and a satisfied predicate", () => {
+  const manifest = buildPromotionManifest(manifestInput({
+    target_mode: "enabled",
+    auto_qualification: {
+      receipt: { digest: DIGEST, route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding" },
+      auto_eligibility: { eligible: true, reasons: [] },
+    },
+  }));
+  assert.equal(manifest.auto_activation.enabled, true);
+  assert.equal(manifest.auto_activation.route_id, "codex/gpt-5.6-terra");
+});
+
+test("an ineligible auto predicate cannot enable auto", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({
+    target_mode: "enabled",
+    auto_qualification: {
+      receipt: { digest: DIGEST, route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding" },
+      auto_eligibility: { eligible: false, reasons: ["aggregate cost exceeds $1.00"] },
+    },
+  })), /auto predicate|not eligible/i);
+});
+
+test("auto cannot be enabled for a mode below enabled", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({
+    target_mode: "candidate",
+    auto_qualification: {
+      receipt: { digest: DIGEST, route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding" },
+      auto_eligibility: { eligible: true, reasons: [] },
+    },
+  })), /auto/i);
+});
