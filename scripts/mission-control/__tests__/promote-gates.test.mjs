@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { acceptDispatchRecord, buildPromotionManifest, commitDispatchMode, evaluateModeTransition, evaluatePromotion, readDispatchMode } from "../promote-gates.mjs";
+import { acceptDispatchRecord, buildPromotionManifest, commitDispatchMode, evaluateModeTransition, evaluatePromotion, readDispatchMode, verifyQualificationReceipts } from "../promote-gates.mjs";
 
 const GATE_IDS = [
   "agentdash_local_authority", "hermes_atomicity", "codeg_replay_safety", "pm_isolation",
@@ -300,13 +300,18 @@ test("gate evidence identifies binaries by digest, never by machine-local path",
   const input = manifestInput();
   input.snapshot.proofs = input.snapshot.proofs.map((p) => ({
     ...p,
-    facts: { provenance: { artifact_path: "C:\Users\someone\AppData\Local\hermes\hermes.exe", artifact_sha256: DIGEST, source_commit: COMMIT } },
+    // String.raw: a plain double-quoted string silently drops every backslash, leaving a
+    // fixture that contains no path at all and an assertion that cannot fail.
+    facts: { provenance: { artifact_path: String.raw`C:\Users\LEAKMARKER\AppData\Local\hermes\hermes.exe`, artifact_sha256: DIGEST, source_commit: COMMIT } },
   }));
+
+  // Prove the fixture really is a path before asserting the output is free of it.
+  assert.ok(input.snapshot.proofs[0].facts.provenance.artifact_path.indexOf(String.fromCharCode(92)) >= 0, "the fixture must contain real backslashes");
 
   const manifest = buildPromotionManifest(input);
   const serialized = JSON.stringify(manifest);
-  assert.doesNotMatch(serialized, /C:\\Users|\/home\//i);
-  assert.doesNotMatch(serialized, /someone/i);
+  assert.doesNotMatch(serialized, /LEAKMARKER/);
+  assert.doesNotMatch(serialized, /AppData/i);
   // The binary remains auditable by digest and commit.
   for (const entry of manifest.gate_evidence) {
     assert.match(entry.artifact_sha256, /^[a-f0-9]{64}$/i);
@@ -327,4 +332,58 @@ test("an unparseable clock does not silently disable the expiry check", () => {
   const result = evaluatePromotion(stale, "enabled", Number.NaN);
   assert.equal(result.ready, false);
   assert.match(result.reasons.join(" "), /expired|stale/i);
+});
+
+// ---------------------------------------------------------------------------
+// A qualification receipt must correspond to real evidence, and must not carry
+// machine-local material into the manifest.
+//
+// "promote-gates.mjs ... cannot manufacture evidence" and "Commit only the
+// configuration shape, never machine-local credentials or evidence."
+// ---------------------------------------------------------------------------
+
+test("a receipt is bound by digest only; operator-supplied fields are not persisted", () => {
+  const manifest = buildPromotionManifest(manifestInput({
+    qualification_receipts: [{
+      digest: DIGEST,
+      route_id: "codex/gpt-5.6-terra",
+      task_class: "bounded_coding",
+      workspace_path: String.raw`C:\Users\LEAKMARKER\disposable`,
+      note: "api-key=LEAKED",
+    }],
+  }));
+
+  const serialized = JSON.stringify(manifest.qualification_receipts);
+  assert.doesNotMatch(serialized, /LEAKMARKER/);
+  assert.doesNotMatch(serialized, /LEAKED/i);
+  assert.doesNotMatch(serialized, /workspace_path/);
+  // The receipt is still auditable by its exact digest and route tuple.
+  assert.equal(manifest.qualification_receipts[0].digest, DIGEST);
+  assert.equal(manifest.qualification_receipts[0].route_id, "codex/gpt-5.6-terra");
+});
+
+test("promotion to enabled rejects a receipt with no matching evidence on disk", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-receipt-"));
+  try {
+    // No route-evidence/<digest>.json exists, so this receipt was never produced by
+    // a qualification run and cannot authorize model-backed dispatch.
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }]),
+      /no matching qualification evidence|manufacture/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("promotion accepts a receipt whose evidence really exists", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-receipt-"));
+  try {
+    const dir = join(stateDir, "route-evidence");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${DIGEST}.json`), JSON.stringify({ evidence_digest: DIGEST }), "utf8");
+    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }]);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
 });

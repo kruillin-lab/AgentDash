@@ -123,6 +123,16 @@ export function buildPromotionManifest(input) {
     if (!SHA256.test(receipt?.digest ?? "")) throw new Error("Every qualification receipt must carry a canonical digest.");
   }
 
+  // Bind each receipt by its digest and route tuple only. Operator-supplied fields
+  // (workspace paths, hostnames, notes) would otherwise be persisted verbatim into a
+  // durable digest-addressed artifact; the digest already identifies the exact run.
+  const boundReceipts = receipts.map((receipt) => ({
+    digest: receipt.digest,
+    receipt_id: typeof receipt.receipt_id === "string" ? receipt.receipt_id : null,
+    route_id: typeof receipt.route_id === "string" ? receipt.route_id : null,
+    task_class: typeof receipt.task_class === "string" ? receipt.task_class : null,
+  }));
+
   // Bind each gate to its exact evidence digest, external commit, and binary.
   const gateEvidence = GATE_IDS.map((gateId) => {
     const proof = snapshot.proofs.find((candidate) => candidate?.gate_id === gateId);
@@ -148,7 +158,7 @@ export function buildPromotionManifest(input) {
     target_mode,
     operator_command: redactOperatorCommand(operator_command),
     gate_evidence: gateEvidence,
-    qualification_receipts: receipts,
+    qualification_receipts: boundReceipts,
     snapshot_digest: evaluation.manifest_digest,
     created_at: now,
     // Expiry is the snapshot's own earliest proof expiry; promotion never
@@ -264,6 +274,22 @@ async function writeDispatchRecords(dir, manifest) {
   return { mode_path: join(dir, "mode.json"), manifest_path: manifestPath };
 }
 
+/**
+ * A receipt authorizes model-backed dispatch only if the qualification runner really
+ * produced it: the runner writes its evidence as route-evidence/<evidence_digest>.json,
+ * so an absent file means the receipt was manufactured. Promotion cannot invent evidence.
+ */
+export async function verifyQualificationReceipts(stateDir, receipts) {
+  for (const receipt of receipts ?? []) {
+    if (!SHA256.test(receipt?.digest ?? "")) throw new Error("Every qualification receipt must carry a canonical digest.");
+    try {
+      await readFile(join(stateDir, "route-evidence", `${receipt.digest}.json`), "utf8");
+    } catch {
+      throw new Error("A qualification receipt has no matching qualification evidence; promotion cannot manufacture evidence.");
+    }
+  }
+}
+
 export async function readLatestSnapshot(evidenceDir) {
   // Evidence is digest-addressed; the operator selects the exact snapshot file.
   // This helper reads one explicit path rather than guessing a "latest".
@@ -328,6 +354,19 @@ async function main(argv) {
     } catch (error) {
       console.error("Mission Control promotion: NO-GO");
       console.error(`- Could not read qualification receipts: ${redactDiagnostic(error?.message)}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  // A receipt authorizes model-backed dispatch only if the qualification runner
+  // really produced its evidence. Verified before any manifest is built.
+  if (targetMode === "enabled") {
+    try {
+      await verifyQualificationReceipts(stateDir, receipts);
+    } catch (error) {
+      console.error("Mission Control promotion: NO-GO");
+      console.error("- " + redactDiagnostic(error && error.message));
       process.exitCode = 1;
       return;
     }

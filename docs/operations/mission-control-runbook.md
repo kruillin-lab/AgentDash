@@ -110,7 +110,12 @@ Promotion is a real **compare-and-set** over a durable record under
   fails with a compare-and-set reason and changes nothing. An absent record
   reads as `disabled`.
 - Promotion to `enabled` additionally requires at least one qualification
-  receipt (`--qualification-receipts=<path>`), each carrying a canonical digest.
+  receipt (`--qualification-receipts=<path>`). Each receipt's digest must match
+  real evidence the qualification runner wrote to
+  `AGENTDASH_STATE_DIR/route-evidence/<digest>.json`; a well-formed but
+  fabricated receipt is refused, because promotion cannot manufacture evidence.
+  Only the digest and route tuple are persisted — any other field an operator
+  puts in the receipt file is dropped rather than baked into the manifest.
 - Each promotion writes an immutable `PromotionManifestV1` beside the record as
   `promotion-<digest>.json`. It binds every gate's evidence digest, external
   commit and binary digest, the qualification receipts, the operator command,
