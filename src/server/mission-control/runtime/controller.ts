@@ -2,6 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 
+import { chooseContinuation, type ContinuationDecisionV1, type ContinuationInput } from "../controller/continuation";
 import type { ActionCommandAdvanceResult } from "./action-command";
 import type { RecoveryOutbox } from "./outbox";
 import type { ControllerOwner, OwnerLease } from "./owner-lock";
@@ -113,5 +114,16 @@ export class MissionControlController {
     if (!decision.allowed) throw new Error(`Mission control dispatch is disabled: ${decision.reason}`);
     if (this.lease === null) throw new Error("Only the controller owner may schedule controller work.");
     return this.runner.advance(commandId);
+  }
+
+  /**
+   * Deterministically choose the next mechanism after an action closes. This is
+   * a pure planner: it never calls a model or adapter, and it never interrupts
+   * the CEO for technical retry, remediation, verification, or finalization
+   * already inside the activated mandate. Dispatching a `schedule_action`
+   * result still goes through the gated `advanceCommand`.
+   */
+  continueTask(input: ContinuationInput): ContinuationDecisionV1 {
+    return chooseContinuation(input);
   }
 }

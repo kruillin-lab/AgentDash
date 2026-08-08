@@ -104,3 +104,35 @@ describe("MissionControlController ownership", () => {
     await second.stop();
   });
 });
+
+describe("MissionControlController continuation", () => {
+  const mandate = {
+    action_nodes: [
+      { node_id: "execute", action_role: "execute" as const, route_id: "route-primary" },
+      { node_id: "fallback-1", action_role: "retry" as const, route_id: "route-fallback" },
+    ],
+    transition_graph: { execute: { transient_infrastructure: { kind: "node" as const, node_id: "fallback-1" } } },
+    visit_caps: { execute: 1, "fallback-1": 1 },
+    edge_visit_caps: { "execute:transient_infrastructure": 1 },
+    per_action_limits: { execute: { max_cost_usd: 0.3 }, "fallback-1": { max_cost_usd: 0.3 } },
+    aggregate_budget: { max_cost_usd: 1 },
+    task_reserves_usd: 0.2,
+  };
+
+  test("continueTask plans a technical retry without a CEO interruption", async () => {
+    const root = await stateRoot();
+    const controller = new MissionControlController({ mode: "disabled", ...runtime(root) });
+
+    const decision = controller.continueTask({
+      mandate,
+      node: "execute",
+      outcome: "transient_infrastructure",
+      visits: { node_visits: { execute: 1 }, edge_visits: {} },
+      ledger: { schema_version: "agentdash.budget-ledger/v1", aggregate_limit_usd: 1, observed_cost_usd: 0, held_task_reserves_usd: 0.2, held_command_headroom_usd: 0, commands: {} },
+      routeEvidence: () => "current",
+    });
+
+    expect(decision).toEqual({ kind: "schedule_action", node_id: "fallback-1" });
+    expect(decision.kind).not.toBe("request_ceo_input");
+  });
+});
