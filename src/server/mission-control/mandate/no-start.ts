@@ -162,7 +162,22 @@ export function runNoStartChecks(rawInput: NoStartInput): NoStartReportV1 {
     if (!evidence || evidence.route_proof_id !== verifier.route_proof_id || evidence.evidence_digest !== verifier.route_proof_digest) addReason(reasons, "route_proof_mismatch", "Verification must bind the exact current route proof.");
   }
 
-  if (verifier.required_independence_tier === 2) {
+  // High-risk work requires Tier 2, and CEO approval cannot waive that floor, so the requirement is
+  // compelled by the task's risk rather than accepted from the mandate it governs. Tier 2 is
+  // satisfied either by "an independently trusted deterministic verifier whose checks completely
+  // decide the acceptance criteria" or, when model-based, by a verifier whose provider AND outer
+  // harness differ from every mutating route that can precede it. A high-risk mandate that declares
+  // Tier 1 for a MODEL-backed verifier is therefore waiving the floor and fails closed; a
+  // deterministic verifier already meets Tier 2 regardless of the declared tier.
+  const highRisk = task.risk_mode !== "auto";
+  const deterministicVerifier = verifier.deterministic_verifier_id !== null && verifier.route_id === null;
+  if (highRisk && !deterministicVerifier && verifier.required_independence_tier !== 2) {
+    addReason(reasons, "independence_tier_too_low", "High-risk work requires a Tier 2 independent verifier; the tier cannot be lowered by the mandate.");
+  }
+
+  // Run the independence proof whenever Tier 2 is declared or compelled by risk. A deterministic
+  // verifier decides the acceptance criteria itself and has no provider/harness to compare.
+  if (!deterministicVerifier && (verifier.required_independence_tier === 2 || highRisk)) {
     for (const path of graph.paths.filter((candidate) => candidate.terminal_outcome === "succeeded")) {
       const verifierIndex = path.node_ids.findLastIndex((nodeId) => mandate.action_nodes.find((node) => node.node_id === nodeId)?.action_role === "verify");
       const verifierNode = verifierIndex >= 0 ? mandate.action_nodes.find((node) => node.node_id === path.node_ids[verifierIndex]) : undefined;

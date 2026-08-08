@@ -199,6 +199,28 @@ describe("composed no-start proof", () => {
     expect(codes(input)).toContain("capability_scope_mismatch");
   });
 
+  // "High-risk work requires Tier 2 and fails the no-start invariant when no current proven verifier
+  // satisfies it... CEO approval cannot waive this MVP safety floor." The tier must therefore be
+  // compelled by the task's risk, not self-declared by the mandate it governs.
+  test("refuses to let high-risk work self-declare a Tier 1 model verifier", () => {
+    const input = validFixture();
+    // The fixture is approval_required (high risk) with a compliant model-backed Tier 2 verifier.
+    // Downgrading the declared tier must not silently skip the independence floor.
+    Object.assign(input.mandate.verification_step, { required_independence_tier: 1 as const });
+
+    expect(codes(input)).toContain("independence_tier_too_low");
+  });
+
+  test("still enforces Tier 2 independence for high-risk work that declares tier 2", () => {
+    const input = validFixture();
+    // Make the verifier share the executing route's provider: independence must fail.
+    const execute = input.routes.find((evidence) => evidence.route_id === "route-execute");
+    const verify = input.routes.find((evidence) => evidence.route_id === "route-verify");
+    if (execute && verify) Object.assign(verify, { provider: execute.provider });
+
+    expect(codes(input)).toContain("verifier_not_independent");
+  });
+
   test("binds deterministic TaskSpec phases to their exact controller executor kinds", () => {
     const input = validFixture();
     Object.assign(input.task_spec.route_plan[0], { deterministic: true, route_id: null });
