@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildPromotionManifest, evaluateModeTransition, evaluatePromotion } from "../promote-gates.mjs";
+import { acceptDispatchRecord, buildPromotionManifest, evaluateModeTransition, evaluatePromotion } from "../promote-gates.mjs";
 
 const GATE_IDS = [
   "agentdash_local_authority", "hermes_atomicity", "codeg_replay_safety", "pm_isolation",
@@ -152,4 +152,34 @@ test("a no-op transition to the same mode is rejected", () => {
 test("an absent store reads as disabled, the fail-closed default", () => {
   const result = evaluateModeTransition({ stored_mode: null, expected_current_mode: "disabled", target_mode: "candidate" });
   assert.equal(result.ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// The promotion reader must accept EXACTLY what the runtime accepts. If they
+// disagree, --expect-current compares against a mode that is not in force.
+// The runtime's rules live in runtime/composition.ts::readPromotedDispatchMode:
+// a valid mode, a 64-hex manifest_digest, and an unexpired expires_at.
+// ---------------------------------------------------------------------------
+
+const FUTURE = "2099-01-01T00:00:00.000Z";
+
+test("a well-formed promotion record is accepted", () => {
+  assert.equal(acceptDispatchRecord({ mode: "candidate", manifest_digest: DIGEST, expires_at: FUTURE }), "candidate");
+});
+
+test("a record without a bound manifest digest is not authority", () => {
+  assert.equal(acceptDispatchRecord({ mode: "enabled", expires_at: FUTURE }), null);
+  assert.equal(acceptDispatchRecord({ mode: "enabled", manifest_digest: "not-a-digest", expires_at: FUTURE }), null);
+});
+
+test("an expired promotion record is not authority", () => {
+  assert.equal(acceptDispatchRecord({ mode: "enabled", manifest_digest: DIGEST, expires_at: "2020-01-01T00:00:00.000Z" }), null);
+});
+
+test("an unknown mode is not authority", () => {
+  assert.equal(acceptDispatchRecord({ mode: "production", manifest_digest: DIGEST, expires_at: FUTURE }), null);
+});
+
+test("a non-object record is not authority", () => {
+  for (const raw of [null, undefined, 7, "enabled", []]) assert.equal(acceptDispatchRecord(raw), null);
 });

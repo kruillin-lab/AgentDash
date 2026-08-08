@@ -135,10 +135,24 @@ export function evaluateModeTransition({ stored_mode, expected_current_mode, tar
 }
 
 /** Read the durable mode, treating an absent or unreadable store as `disabled`. */
-export async function readDispatchMode(stateDir) {
+export function acceptDispatchRecord(raw, now = Date.now()) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  // Authority requires the bound manifest digest; a bare mode is not a promotion.
+  if (!SHA256.test(raw.manifest_digest ?? "")) return null;
+  // A promotion never outlives the evidence that justified it.
+  if (typeof raw.expires_at === "string" && Date.parse(raw.expires_at) <= now) return null;
+  return MODES.includes(raw.mode) ? raw.mode : null;
+}
+
+/**
+ * Read the durable mode. This must accept EXACTLY what the runtime accepts
+ * (readPromotedDispatchMode in runtime/composition.ts): if the two readers
+ * disagree, `--expect-current` would compare against a mode that is not the one
+ * actually in force.
+ */
+export async function readDispatchMode(stateDir, now = Date.now()) {
   try {
-    const raw = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
-    return MODES.includes(raw?.mode) ? raw.mode : null;
+    return acceptDispatchRecord(JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8")), now);
   } catch {
     return null;
   }
