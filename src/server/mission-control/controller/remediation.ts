@@ -19,7 +19,11 @@ export interface RemediationNodeView {
 
 export type RemediationCycle =
   | { kind: "in_scope"; scope: { finding_classes: string[]; artifact_scope: string[] } }
-  | { kind: "expansion"; decision_type: "capability_change" };
+  // The plan enumerates expansion kinds distinctly ("route, capability, workspace, objective,
+  // acceptance, budget, or external-effect expansion"), so the request must name the decision the CEO
+  // is actually being asked to make: widening the artifact scope is a workspace change, while
+  // addressing an unnamed finding class is a capability change.
+  | { kind: "expansion"; decision_type: "capability_change" | "workspace_change" };
 
 // Minimal glob containment: a trailing `/**` matches any path beneath the
 // prefix; any other pattern matches only an identical path.
@@ -46,8 +50,11 @@ export function buildRemediationCycle(
   const findingsInScope = requested.finding_classes.every((finding) => named.finding_classes.includes(finding));
   const artifactsInScope = requested.artifact_scope.every((path) => pathWithinScope(path, named.artifact_scope));
   if (!findingsInScope || !artifactsInScope) {
-    // Out-of-mandate remediation is an expansion, not silent work.
-    return { kind: "expansion", decision_type: "capability_change" };
+    // Out-of-mandate remediation is an expansion, not silent work. Name the exact decision: an
+    // unnamed finding class needs a wider capability, whereas an out-of-scope artifact path needs a
+    // wider workspace boundary. A finding-class expansion takes precedence when both are exceeded,
+    // because the capability is the broader grant.
+    return { kind: "expansion", decision_type: !findingsInScope ? "capability_change" : "workspace_change" };
   }
   return { kind: "in_scope", scope: { finding_classes: requested.finding_classes, artifact_scope: requested.artifact_scope } };
 }

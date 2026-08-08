@@ -29,8 +29,16 @@ describe("buildRemediationCycle", () => {
     expect(cycle).toEqual({ kind: "expansion", decision_type: "capability_change" });
   });
 
-  test("artifact paths outside the named scope are an expansion", () => {
+  // The plan enumerates expansion kinds distinctly, so the typed request must name the decision the
+  // CEO is actually being asked to make. Widening the artifact boundary is a workspace change, not a
+  // capability change.
+  test("artifact paths outside the named scope are a workspace expansion", () => {
     const cycle = buildRemediationCycle(remediateNode, { finding_classes: ["lint"], artifact_scope: ["secrets/**"] });
+    expect(cycle).toEqual({ kind: "expansion", decision_type: "workspace_change" });
+  });
+
+  test("an unnamed finding class takes precedence when both scopes are exceeded", () => {
+    const cycle = buildRemediationCycle(remediateNode, { finding_classes: ["security"], artifact_scope: ["secrets/**"] });
     expect(cycle).toEqual({ kind: "expansion", decision_type: "capability_change" });
   });
 });
