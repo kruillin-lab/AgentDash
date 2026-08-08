@@ -115,6 +115,20 @@ export const ReconciliationDeadlinesV1Schema = z.object({
 }).strict();
 export type ReconciliationDeadlinesV1 = z.infer<typeof ReconciliationDeadlinesV1Schema>;
 
+/**
+ * The approved initial reconciliation defaults. These are explicit mandate values, not hidden
+ * polling behavior: a mandate carries them so every uncertain operation exits Working by a numeric
+ * deadline and a bounded observation count. A mandate may tighten them; the validator rejects a
+ * mandate that has no deadline for a reachable uncertain operation.
+ */
+export const INITIAL_RECONCILIATION_DEADLINES_V1: ReconciliationDeadlinesV1 = ReconciliationDeadlinesV1Schema.parse({
+  dispatch_lookup: { deadline_ms: 60_000, max_attempts: 6 },
+  cancel_confirmation: { deadline_ms: 60_000, max_attempts: 6 },
+  orphan_recovery: { deadline_ms: 120_000, max_attempts: 12 },
+  finalization: { deadline_ms: 60_000, max_attempts: 6 },
+  receipt_delivery: { deadline_ms: 120_000, max_attempts: 12 },
+});
+
 /** Opaque, pre-redacted transport evidence; never a raw adapter payload. */
 export const RedactedPayloadV1Schema = z.object({ redacted: z.literal(true), digest: DigestSchema, summary: z.string().min(1).max(4096) }).strict();
 export type RedactedPayloadV1 = z.infer<typeof RedactedPayloadV1Schema>;

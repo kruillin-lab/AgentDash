@@ -72,7 +72,9 @@ export function buildBoardProjection(source: HermesBoardSnapshotV1, outbox: Outb
     const outcome = taskOutcomeForTask(task.task_outcome, task.task_id);
     if (task.state === "archived") archivedCount += 1;
     if (pending.has(task.task_id)) {
-      lanes.stopped.push(redactedCard(task, `${task.detail} Reconciliation pending: outbox state is not yet confirmed.`));
+      // Exact user-visible text required by the approved design: the UI says
+      // "Stopped — reconciliation pending" while Hermes delivery remains queued.
+      lanes.stopped.push(redactedCard(task, `${task.detail} Stopped — reconciliation pending.`));
     } else if (task.state === "archived") {
       continue;
     } else if (task.state === "done" && outcome?.outcome === "succeeded") {

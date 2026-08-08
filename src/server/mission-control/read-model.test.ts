@@ -154,8 +154,10 @@ describe("buildBoardProjection", () => {
 
     expect(board.lanes.needs_you).toHaveLength(0);
     expect(board.lanes.completed).toHaveLength(0);
+    // The design mandates this exact user-visible text: "the UI says **Stopped — reconciliation
+    // pending**". Assert the literal sentence, not a loose substring.
     expect(board.lanes.stopped.map((item) => item.summary)).toEqual(expect.arrayContaining([
-      expect.stringContaining("Reconciliation pending"),
+      expect.stringContaining("Stopped — reconciliation pending"),
     ]));
   });
 });

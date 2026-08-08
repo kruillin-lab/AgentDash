@@ -1,14 +1,11 @@
 import { describe, expect, test } from "vitest";
 
+import { INITIAL_RECONCILIATION_DEADLINES_V1 } from "../../../lib/mission-control/contracts";
+
 import { Reconciler, type ReconciliationRecord } from "./reconciler";
 
-const limits = {
-  dispatch_lookup: { max_attempts: 6, deadline_ms: 60_000 },
-  cancel_confirmation: { max_attempts: 6, deadline_ms: 60_000 },
-  orphan_recovery: { max_attempts: 12, deadline_ms: 120_000 },
-  finalization: { max_attempts: 6, deadline_ms: 60_000 },
-  receipt_delivery: { max_attempts: 12, deadline_ms: 120_000 },
-};
+// Exercise the shipped default mandate values rather than a hand-copied duplicate of the table.
+const limits = INITIAL_RECONCILIATION_DEADLINES_V1;
 
 function clock(start = Date.parse("2026-08-06T12:00:00.000Z")) {
   let current = start;
@@ -91,5 +88,17 @@ describe("Reconciler.tick", () => {
     clk.advanceMs(61_000);
     const decision = Reconciler.tick(clk.now(), record({ category: "dispatch_lookup", started_at: "2026-08-06T12:00:00.000Z" }), limits);
     expect(decision).toMatchObject({ terminal: "inconsistent", allow_new_work: false });
+  });
+
+  // The approved initial defaults are explicit mandate values, not hidden polling behavior. Pin the
+  // exact table so a silently widened deadline or observation cap fails the gate.
+  test("ships the approved initial reconciliation deadline table", () => {
+    expect(INITIAL_RECONCILIATION_DEADLINES_V1).toEqual({
+      dispatch_lookup: { deadline_ms: 60_000, max_attempts: 6 },
+      cancel_confirmation: { deadline_ms: 60_000, max_attempts: 6 },
+      orphan_recovery: { deadline_ms: 120_000, max_attempts: 12 },
+      finalization: { deadline_ms: 60_000, max_attempts: 6 },
+      receipt_delivery: { deadline_ms: 120_000, max_attempts: 12 },
+    });
   });
 });
