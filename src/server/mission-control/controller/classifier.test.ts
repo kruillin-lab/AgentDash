@@ -24,7 +24,7 @@ function evidence(overrides: Partial<ActionClassificationEvidence> = {}): Action
     policy_violation: false,
     budget_exhausted: false,
     route_available: true,
-    ceo_input_required: false,
+    ceo_input: null,
     transport_ambiguous: false,
     semantic_failure: false,
     ...overrides,
@@ -42,7 +42,7 @@ describe("action classifier", () => {
     ["timed_out", { observed_terminal_at: "2026-08-06T12:02:00.000Z" }],
     ["budget_exhausted", { budget_exhausted: true }],
     ["route_unavailable", { route_available: false, adapter_terminal_code: null, observed_terminal_at: null }],
-    ["ceo_input_required", { ceo_input_required: true }],
+    ["ceo_input_required", { ceo_input: { decision_type: "route_change", mandate_can_decide: false } }],
     ["ambiguous", { adapter_terminal_code: null, observed_terminal_at: null, transport_ambiguous: true }],
   ] as const)("classifies %s deterministically", (expected, overrides) => {
     expect(classifyAction(evidence(overrides as Partial<ActionClassificationEvidence>)).outcome).toBe(expected);
@@ -98,6 +98,23 @@ describe("action classifier", () => {
   // failure down a reconciliation path instead of remediation.
   test("a known failure code with no terminal timestamp is a semantic failure, not ambiguous", () => {
     expect(classifyAction(evidence({ adapter_terminal_code: "test_failed", observed_terminal_at: null })).outcome).toBe("semantic_failure");
+  });
+
+  // Rule 6: "`ceo_input_required` requires a typed proposed change that maps to a CEOInputRequestV1
+  // decision type and controller proof that the current TaskSpec/mandate cannot decide it. Model
+  // prose alone is insufficient." A bare assertion cannot express either half, so the classifier
+  // requires the typed request itself.
+  test("requires a typed decision and controller proof for ceo_input_required", () => {
+    // A typed decision plus proof the active mandate cannot decide it.
+    expect(classifyAction(evidence({
+      ceo_input: { decision_type: "route_change", mandate_can_decide: false },
+    })).outcome).toBe("ceo_input_required");
+  });
+
+  test("refuses ceo_input_required when the active mandate can already decide the change", () => {
+    expect(classifyAction(evidence({
+      ceo_input: { decision_type: "route_change", mandate_can_decide: true },
+    })).outcome).not.toBe("ceo_input_required");
   });
 
   test("genuinely unknown transport state is still ambiguous", () => {

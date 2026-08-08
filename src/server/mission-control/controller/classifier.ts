@@ -12,6 +12,18 @@ import {
   type RouteProofId,
 } from "../../../lib/mission-control/contracts";
 
+/** The exact CEOInputRequestV1 decision types; a change outside this set is not CEO input. */
+export type CEOInputDecisionType =
+  | "initial_mandate_approval"
+  | "objective_change"
+  | "acceptance_change"
+  | "business_product_decision"
+  | "route_change"
+  | "capability_change"
+  | "workspace_change"
+  | "budget_change"
+  | "new_external_action";
+
 /**
  * The closed allowlist of adapter/provider failure codes that may be classified as
  * `transient_infrastructure`. Evidence precedence rule 4 permits only an allowlisted code; test
@@ -59,7 +71,12 @@ export interface ActionClassificationEvidence {
   policy_violation: boolean;
   budget_exhausted: boolean;
   route_available: boolean;
-  ceo_input_required: boolean;
+  /**
+   * A typed CEO-input decision, present only when the controller has both a proposed change that
+   * maps to a CEOInputRequestV1 decision type AND proof that the active TaskSpec/mandate cannot
+   * decide it. Model prose alone is insufficient, so this is a typed record rather than a flag.
+   */
+  ceo_input: { decision_type: CEOInputDecisionType; mandate_can_decide: boolean } | null;
   transport_ambiguous: boolean;
   // NOTE: there is deliberately no caller-supplied `transient_infrastructure` flag. That outcome is
   // derived from `adapter_terminal_code` against TRANSIENT_INFRASTRUCTURE_CODES, so an adapter or
@@ -69,7 +86,8 @@ export interface ActionClassificationEvidence {
 
 function chooseOutcome(evidence: ActionClassificationEvidence): ActionOutcome {
   if (evidence.policy_violation) return "policy_violation";
-  if (evidence.ceo_input_required) return "ceo_input_required";
+  // Only a typed decision the active mandate cannot decide becomes ceo_input_required.
+  if (evidence.ceo_input !== null && !evidence.ceo_input.mandate_can_decide) return "ceo_input_required";
   if (evidence.budget_exhausted) return "budget_exhausted";
   if (!evidence.route_available) return "route_unavailable";
 
