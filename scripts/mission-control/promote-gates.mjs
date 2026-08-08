@@ -335,8 +335,11 @@ async function readRevocations(stateDir) {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (error) {
+    // Only "there is no such directory" means there are no revocations. Any other
+    // error means we cannot PROVE the route is unrevoked, which must fail closed.
+    if (error && error.code === "ENOENT") return [];
+    throw new Error("Route revocations could not be read; promotion cannot prove the route is still qualified.");
   }
   const revocations = [];
   for (const entry of entries) {
@@ -349,6 +352,12 @@ async function readRevocations(stateDir) {
     }
   }
   return revocations;
+}
+
+export async function readLatestSnapshot(evidencePath) {
+  // Evidence is digest-addressed; the operator selects the exact snapshot file.
+  // This helper reads one explicit path rather than guessing a "latest".
+  return JSON.parse(await readFile(evidencePath, "utf8"));
 }
 
 async function main(argv) {

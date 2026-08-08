@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -495,6 +496,96 @@ test("a symlinked evidence file cannot authorize promotion", async (t) => {
       verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
       /immutable regular file/i,
     );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Only ENOENT means "no revocations". Any other error means we cannot PROVE the
+// route is unrevoked, which must fail closed rather than read as "none".
+// ---------------------------------------------------------------------------
+
+test("an unreadable revocations directory fails closed", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-revoke-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile());
+    // A FILE where the directory belongs makes readdir fail with ENOTDIR, which is
+    // "cannot enumerate", not "there are none". chmod is a no-op on Windows, so this
+    // is the portable way to force a non-ENOENT readdir error.
+    await writeFile(join(stateDir, "route-revocations"), "not a directory", "utf8");
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /revocations could not be read|cannot prove/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("an absent revocations directory means there are none", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-revoke-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile());
+    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z"));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("future-dated evidence is not yet valid", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-future-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile({ evaluated_at: "2030-01-01T00:00:00.000Z" }));
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /not yet valid/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a revocation predating the evidence does not supersede it", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-revoke-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile());
+    const revDir = join(stateDir, "route-revocations");
+    await mkdir(revDir, { recursive: true });
+    // Revoked BEFORE this evidence was evaluated: the route was re-qualified after.
+    await writeFile(join(revDir, `${"e".repeat(64)}.json`), JSON.stringify({
+      route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding", revoked_at: "2026-07-01T00:00:00.000Z",
+    }), "utf8");
+    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z"));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The CLI entrypoint must actually run. Unit-testing the exported helpers alone
+// let a deleted function reach HEAD with every real invocation crashing.
+// ---------------------------------------------------------------------------
+
+test("the CLI runs end to end and reports its dry-run transition", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-cli-"));
+  try {
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const snapshot = { ...fullSnapshot(), expires_at: future };
+    snapshot.proofs = snapshot.proofs.map((proof) => ({ ...proof, expires_at: future }));
+    const snapshotPath = join(stateDir, "snapshot.json");
+    await writeFile(snapshotPath, JSON.stringify(snapshot), "utf8");
+
+    const result = spawnSync(process.execPath, [
+      "scripts/mission-control/promote-gates.mjs",
+      "--mode=candidate", `--evidence=${snapshotPath}`, "--expect-current=disabled",
+    ], { encoding: "utf8", env: { ...process.env, AGENTDASH_STATE_DIR: stateDir } });
+
+    const output = `${result.stdout}${result.stderr}`;
+    assert.doesNotMatch(output, /is not defined|ReferenceError|TypeError/, output);
+    assert.match(output, /dry run/i, output);
+    assert.match(output, /Compare-and-set from disabled to candidate/i, output);
+    assert.equal(result.status, 0, output);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
