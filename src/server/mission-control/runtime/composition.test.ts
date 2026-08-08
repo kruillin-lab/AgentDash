@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,22 @@ async function stateRoot(): Promise<string> {
   return root;
 }
 
+// Write the durable record `promote-gates --promote` produces, so these tests
+// exercise the same authority path production reads.
+async function writePromotion(stateDir: string, mode: string, overrides: Record<string, unknown> = {}) {
+  const dir = join(stateDir, "dispatch");
+  await mkdir(dir, { recursive: true });
+  const record = {
+    schema_version: "agentdash.dispatch-mode/v1",
+    mode,
+    manifest_digest: "a".repeat(64),
+    promoted_at: "2026-08-06T12:00:00.000Z",
+    expires_at: "2099-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+  await writeFile(join(dir, "mode.json"), JSON.stringify(record), "utf8");
+}
+
 describe("mission control composition root", () => {
   test("builds a dormant controller that owns the lease and refuses model dispatch", async () => {
     process.env.AGENTDASH_STATE_DIR = await stateRoot();
@@ -44,6 +60,62 @@ describe("mission control composition root", () => {
     // Even wired and owning the lease, no command can reach a worker transport:
     // there is no staged proposal and the dormant adapters fail closed.
     await expect(controller?.advanceCommand("command-1")).rejects.toThrow();
+  });
+
+  // The durable promotion record is the only grant of authority. An env var alone
+  // must never reach `enabled`, or promotion would not be a compare-and-set at all.
+  test("an env var alone never grants enabled without a promotion record", async () => {
+    process.env.AGENTDASH_STATE_DIR = await stateRoot();
+    process.env.MISSION_CONTROL_DISPATCH = "enabled";
+
+    const controller = await getMissionControlController();
+
+    expect(controller?.gate("model_backed").allowed).toBe(false);
+    expect(controller?.gate("candidate").allowed).toBe(false);
+  });
+
+  test("a durable promotion record grants exactly the promoted mode", async () => {
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    delete process.env.MISSION_CONTROL_DISPATCH;
+    await writePromotion(stateDir, "enabled");
+
+    const controller = await getMissionControlController();
+
+    expect(controller?.gate("model_backed").allowed).toBe(true);
+  });
+
+  test("an env var may narrow a promoted mode for rollback", async () => {
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    process.env.MISSION_CONTROL_DISPATCH = "disabled";
+    await writePromotion(stateDir, "enabled");
+
+    const controller = await getMissionControlController();
+
+    expect(controller?.gate("model_backed").allowed).toBe(false);
+  });
+
+  test("an expired promotion record grants nothing", async () => {
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    delete process.env.MISSION_CONTROL_DISPATCH;
+    await writePromotion(stateDir, "enabled", { expires_at: "2020-01-01T00:00:00.000Z" });
+
+    const controller = await getMissionControlController();
+
+    expect(controller?.gate("model_backed").allowed).toBe(false);
+  });
+
+  test("a record without a bound manifest digest grants nothing", async () => {
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    delete process.env.MISSION_CONTROL_DISPATCH;
+    await writePromotion(stateDir, "enabled", { manifest_digest: "not-a-digest" });
+
+    const controller = await getMissionControlController();
+
+    expect(controller?.gate("model_backed").allowed).toBe(false);
   });
 
   test("returns one shared controller and never a second owner for the same state dir", async () => {

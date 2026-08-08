@@ -92,20 +92,52 @@ terminal outcome.
 
 ```powershell
 node scripts/mission-control/refresh-gates.mjs
-node scripts/mission-control/promote-gates.mjs --evidence=<snapshot> --mode=<mode> [--promote]
+node scripts/mission-control/promote-gates.mjs --evidence=<snapshot> --mode=<mode> `
+  --expect-current=<mode> --qualification-receipts=<path> [--promote]
 ```
 
 `promote-gates.mjs` promotes only when the full conjunction passes with verified
-evidence digests and external commits, as a compare-and-set from the current
-mode, and only with the explicit `--promote` operator action. Without
-`--promote` it is a dry run. It cannot manufacture evidence or promote a
-partial conjunction.
+evidence digests and external commits, and only with the explicit `--promote`
+operator action. Without `--promote` it is a dry run that reports the manifest
+digest and the mode transition it would apply. It cannot manufacture evidence or
+promote a partial conjunction.
+
+Promotion is a real **compare-and-set** over a durable record under
+`AGENTDASH_STATE_DIR/dispatch/mode.json`:
+
+- `--expect-current=<mode>` is the mode the operator believes is active.
+  Promotion applies only if the durable record still holds it; otherwise it
+  fails with a compare-and-set reason and changes nothing. An absent record
+  reads as `disabled`.
+- Promotion to `enabled` additionally requires at least one qualification
+  receipt (`--qualification-receipts=<path>`), each carrying a canonical digest.
+- Each promotion writes an immutable `PromotionManifestV1` beside the record as
+  `promotion-<digest>.json`. It binds every gate's evidence digest, external
+  commit and binary digest, the qualification receipts, the operator command,
+  the mode transition, the timestamp, and the expiry inherited from the
+  snapshot's earliest proof expiry.
+- A no-op transition to the mode already stored is rejected.
+
+Neither the record nor the manifest is committed: both are machine-local state.
+
+## Dispatch authority
+
+The durable promotion record is the only thing that **grants** authority.
+`MISSION_CONTROL_DISPATCH` can only ever **restrict** it further. So an
+environment variable alone can never reach `enabled`, and a promoted mode never
+outlives its evidence expiry or survives a missing manifest digest.
 
 ## Rollback
 
-Set `MISSION_CONTROL_DISPATCH=disabled` and restart. The board returns to
-read-only, activation and dispatch are denied, and the dormant runtime holds no
-live dispatch. Rollback never requires editing a database.
+Set `MISSION_CONTROL_DISPATCH=disabled` and restart. Because the environment may
+narrow the promoted mode, this takes effect immediately without touching the
+durable record, so the promotion evidence is preserved for audit. The board
+returns to read-only, activation and dispatch are denied, and the dormant
+runtime holds no live dispatch. Rollback never requires editing a database.
+
+To roll back durably, run `promote-gates.mjs --mode=disabled
+--expect-current=<current> --promote`, which records the reverse transition with
+its own manifest.
 
 ## Recovery without database editing
 

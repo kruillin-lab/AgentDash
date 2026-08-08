@@ -19,6 +19,34 @@ export function parseDispatchMode(raw: unknown): DispatchMode {
 }
 
 // ---------------------------------------------------------------------------
+// Resolving the effective mode
+//
+// The durable promotion record written by `promote-gates --promote` is the only
+// thing that can GRANT authority: it is the compare-and-set result of a proven
+// gate conjunction bound to a PromotionManifestV1. The environment variable may
+// only ever RESTRICT that further, which keeps the runbook's rollback path
+// (MISSION_CONTROL_DISPATCH=disabled) working without letting an env var
+// escalate past the mode the manifest actually proved.
+//
+// Authority is ordered, and the least-authority value wins.
+// ---------------------------------------------------------------------------
+
+const AUTHORITY_ORDER: readonly DispatchMode[] = ["disabled", "qualification", "candidate", "enabled"];
+
+function authorityRank(mode: DispatchMode): number {
+  return AUTHORITY_ORDER.indexOf(mode);
+}
+
+export function resolveDispatchMode(input: { storedMode: DispatchMode | null | undefined; envMode: unknown }): DispatchMode {
+  const stored = parseDispatchMode(input.storedMode ?? "disabled");
+  // An absent env value does not restrict anything; an invalid one fails closed.
+  const envPresent = input.envMode !== undefined && input.envMode !== null && input.envMode !== "";
+  if (!envPresent) return stored;
+  const env = parseDispatchMode(input.envMode);
+  return authorityRank(env) < authorityRank(stored) ? env : stored;
+}
+
+// ---------------------------------------------------------------------------
 // Controller work kinds and the dispatch gate
 //
 //  - model_backed:  normal chat/board model dispatch (requires `enabled`)

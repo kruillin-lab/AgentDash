@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluatePromotion } from "../promote-gates.mjs";
+import { buildPromotionManifest, evaluateModeTransition, evaluatePromotion } from "../promote-gates.mjs";
 
 const GATE_IDS = [
   "agentdash_local_authority", "hermes_atomicity", "codeg_replay_safety", "pm_isolation",
@@ -69,4 +69,87 @@ test("a missing snapshot cannot be evaluated", () => {
   const result = evaluatePromotion(null, "enabled");
   assert.equal(result.ready, false);
   assert.match(result.reasons.join(" "), /missing gate snapshot/i);
+});
+
+// ---------------------------------------------------------------------------
+// PromotionManifestV1
+//
+// Task 17 Interfaces: "PromotionManifestV1 binds all gate/evidence digests, exact
+// external commits/binaries, qualification receipts, operator command, target
+// mode, timestamp, and expiry".
+// ---------------------------------------------------------------------------
+
+function manifestInput(overrides = {}) {
+  return {
+    snapshot: fullSnapshot(),
+    target_mode: "enabled",
+    current_mode: "candidate",
+    operator_command: "promote-gates --mode=enabled --promote",
+    qualification_receipts: [{ receipt_id: "qualification-1", digest: DIGEST, route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding" }],
+    now: "2026-08-06T12:05:00.000Z",
+    ...overrides,
+  };
+}
+
+test("PromotionManifestV1 binds every required field", () => {
+  const manifest = buildPromotionManifest(manifestInput());
+  assert.equal(manifest.schema_version, "agentdash.promotion-manifest/v1");
+  assert.equal(manifest.target_mode, "enabled");
+  assert.equal(manifest.current_mode, "candidate");
+  assert.equal(manifest.operator_command, "promote-gates --mode=enabled --promote");
+  assert.equal(manifest.created_at, "2026-08-06T12:05:00.000Z");
+  // Expiry is bound from the snapshot, never invented.
+  assert.equal(manifest.expires_at, fullSnapshot().expires_at);
+  // Every gate is bound by id + evidence digest + external commit/binary.
+  assert.equal(manifest.gate_evidence.length, GATE_IDS.length);
+  for (const entry of manifest.gate_evidence) {
+    assert.match(entry.source_digest, /^[a-f0-9]{64}$/i);
+    assert.match(entry.source_commit, /^[a-f0-9]{40}$/i);
+    assert.match(entry.artifact_sha256, /^[a-f0-9]{64}$/i);
+  }
+  assert.equal(manifest.qualification_receipts.length, 1);
+  assert.match(manifest.manifest_digest, /^[a-f0-9]{64}$/i);
+  assert.match(manifest.snapshot_digest, /^[a-f0-9]{64}$/i);
+});
+
+test("PromotionManifestV1 refuses to bind a partial conjunction", () => {
+  const input = manifestInput();
+  input.snapshot.proofs = input.snapshot.proofs.filter((p) => p.gate_id !== "reconciliation");
+  assert.throws(() => buildPromotionManifest(input), /missing gate|partial/i);
+});
+
+test("promotion to enabled requires at least one qualification receipt", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({ qualification_receipts: [] })), /qualification receipt/i);
+});
+
+test("the manifest digest changes when any bound field changes", () => {
+  const a = buildPromotionManifest(manifestInput());
+  const b = buildPromotionManifest(manifestInput({ target_mode: "candidate" }));
+  assert.notEqual(a.manifest_digest, b.manifest_digest);
+});
+
+// ---------------------------------------------------------------------------
+// Compare-and-set from the current mode
+// ---------------------------------------------------------------------------
+
+test("promotion is rejected when the expected current mode does not match the store", () => {
+  const result = evaluateModeTransition({ stored_mode: "disabled", expected_current_mode: "candidate", target_mode: "enabled" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /compare-and-set|current mode/i);
+});
+
+test("promotion is accepted when the expected current mode matches the store", () => {
+  const result = evaluateModeTransition({ stored_mode: "candidate", expected_current_mode: "candidate", target_mode: "enabled" });
+  assert.equal(result.ok, true);
+});
+
+test("a no-op transition to the same mode is rejected", () => {
+  const result = evaluateModeTransition({ stored_mode: "enabled", expected_current_mode: "enabled", target_mode: "enabled" });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /already/i);
+});
+
+test("an absent store reads as disabled, the fail-closed default", () => {
+  const result = evaluateModeTransition({ stored_mode: null, expected_current_mode: "disabled", target_mode: "candidate" });
+  assert.equal(result.ok, true);
 });

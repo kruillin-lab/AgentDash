@@ -1,9 +1,11 @@
 import "server-only";
 
-import { isAbsolute } from "node:path";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 
 import { ActionCommandRunner, CommandProposalJournal, type ActionCommandCodeG, type ActionCommandHermes } from "./action-command";
-import { MissionControlController, parseDispatchMode } from "./controller";
+import { MissionControlController } from "./controller";
+import { DispatchModeSchema, resolveDispatchMode, type DispatchMode } from "./dispatch-mode";
 import { RecoveryOutbox } from "./outbox";
 import { ControllerOwner } from "./owner-lock";
 
@@ -25,6 +27,28 @@ function stateDirFromEnv(): string | null {
   const value = process.env.AGENTDASH_STATE_DIR;
   if (!value || !isAbsolute(value)) return null;
   return value;
+}
+
+/**
+ * Read the durable mode written by `promote-gates --promote`. This is the record
+ * produced by a compare-and-set against a proven gate conjunction and bound to a
+ * PromotionManifestV1. Anything missing, unreadable, or malformed returns null,
+ * which resolves to `disabled`.
+ */
+async function readPromotedDispatchMode(stateDir: string): Promise<DispatchMode | null> {
+  try {
+    const raw: unknown = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
+    if (typeof raw !== "object" || raw === null) return null;
+    const record = raw as { mode?: unknown; manifest_digest?: unknown; expires_at?: unknown };
+    // A promotion never outlives the evidence that justified it.
+    if (typeof record.expires_at === "string" && Date.parse(record.expires_at) <= Date.now()) return null;
+    // Authority requires the bound manifest digest; a bare mode is not a promotion.
+    if (typeof record.manifest_digest !== "string" || !/^[a-f0-9]{64}$/i.test(record.manifest_digest)) return null;
+    const parsed = DispatchModeSchema.safeParse(record.mode);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 // A port whose every method fails closed. Used for the dormant runtime so no
@@ -58,7 +82,14 @@ async function start(): Promise<MissionControlController | null> {
   const stateDir = stateDirFromEnv();
   if (stateDir === null) return null;
 
-  const mode = parseDispatchMode(process.env.MISSION_CONTROL_DISPATCH);
+  // The durable promotion record is the only thing that GRANTS authority; the env
+  // var may only restrict it further (see resolveDispatchMode). A missing or
+  // unreadable record reads as `disabled`, so an un-promoted system stays dormant
+  // no matter what the environment claims.
+  const mode = resolveDispatchMode({
+    storedMode: await readPromotedDispatchMode(stateDir),
+    envMode: process.env.MISSION_CONTROL_DISPATCH,
+  });
   const outbox = new RecoveryOutbox({ stateDir });
   const owner = new ControllerOwner({ stateDir });
   const proposals = new CommandProposalJournal({ stateDir });
