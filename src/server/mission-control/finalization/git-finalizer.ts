@@ -82,9 +82,22 @@ export class GitFastForwardFinalizer {
     return scope.allowed_path_prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
   }
 
+  // This finalizer observes only a Git tree digest. It has no predicate evaluator, so a
+  // `postcondition` expected post-state cannot be proven here. The spec requires the receipt prove
+  // the observed post-state matches the bound digest or deterministic postcondition before success,
+  // so an unverifiable post-state must fail closed instead of being accepted as applied.
+  private postStateVerifiable(command: FinalizationCommandV1): boolean {
+    return command.expected_post_state.kind === "digest";
+  }
+
+  private postStateMatches(command: FinalizationCommandV1, tree: string): boolean {
+    return command.expected_post_state.kind === "digest" && tree === command.expected_post_state.digest;
+  }
+
   async preflight(command: FinalizationCommandV1): Promise<FinalizationPreflightV1> {
     const head = await this.head();
     const observed = await this.treeOf(head);
+    if (!this.postStateVerifiable(command)) return { status: "rejected", observed_digest: observed };
     if (head !== command.cas_precondition.expected_revision) return { status: "drifted", observed_digest: observed };
     return { status: "ready", observed_digest: observed };
   }
@@ -92,6 +105,9 @@ export class GitFastForwardFinalizer {
   async apply(command: FinalizationCommandV1): Promise<FinalizationApplyResultV1> {
     const operationId = command.command_id;
     try {
+      // An unprovable expected post-state can never be finalized here.
+      if (!this.postStateVerifiable(command)) return { status: "rejected", operation_id: operationId };
+
       // Recheck the CAS binding immediately before any mutation.
       const head = await this.head();
       if (head !== command.cas_precondition.expected_revision) return { status: "rejected", operation_id: operationId };
@@ -103,7 +119,7 @@ export class GitFastForwardFinalizer {
         // Canonical empty mutation: the target must already be at the expected state.
         if (source !== head) return { status: "rejected", operation_id: operationId };
         const tree = await this.treeOf(head);
-        if (command.expected_post_state.kind === "digest" && tree !== command.expected_post_state.digest) return { status: "rejected", operation_id: operationId };
+        if (!this.postStateMatches(command, tree)) return { status: "rejected", operation_id: operationId };
         return { status: "applied", operation_id: operationId };
       }
 
@@ -128,7 +144,7 @@ export class GitFastForwardFinalizer {
       const head = await this.head();
       if (source === null || head !== source) return { status: "not_applied", post_state_digest: null };
       const tree = await this.treeOf(head);
-      if (command.expected_post_state.kind === "digest" && tree !== command.expected_post_state.digest) return { status: "not_applied", post_state_digest: null };
+      if (!this.postStateMatches(command, tree)) return { status: "not_applied", post_state_digest: null };
       return { status: "applied", post_state_digest: tree };
     } catch {
       return { status: "unknown", post_state_digest: null };

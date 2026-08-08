@@ -52,7 +52,11 @@ export class NoChangeFinalizer {
   private matches(command: FinalizationCommandV1, observed: { head: string; tree: string }): boolean {
     if (command.mutation_manifest.mutation_type !== "no_change_close") return false;
     if (observed.head !== command.cas_precondition.expected_revision) return false;
-    if (command.expected_post_state.kind === "digest" && observed.tree !== command.expected_post_state.digest) return false;
+    // This finalizer observes only a Git tree digest and has no predicate evaluator, so a
+    // `postcondition` expected post-state is unprovable here and must fail closed rather than be
+    // accepted as applied.
+    if (command.expected_post_state.kind !== "digest") return false;
+    if (observed.tree !== command.expected_post_state.digest) return false;
     return true;
   }
 

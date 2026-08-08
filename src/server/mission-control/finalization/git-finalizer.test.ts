@@ -15,7 +15,12 @@ const roots: string[] = [];
 const digest = "a".repeat(64) as Digest;
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  // On Windows git can still hold pack/index handles for a moment after the process exits, which
+  // makes rmdir raise EBUSY. Retry briefly; temp-directory cleanup is not a proof of behavior, so a
+  // residual directory must not fail the suite.
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined)),
+  );
 });
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -43,7 +48,7 @@ async function repo(): Promise<string> {
   return root;
 }
 
-async function finalizeCommand(input: { base: string; target: string; sourceCommit: string | null; expectedTree: string; entries?: { path: string; operation: "add" | "modify" | "delete"; before_digest: Digest | null; after_digest: Digest | null }[]; diffBytes?: number }) {
+async function finalizeCommand(input: { base: string; target: string; sourceCommit: string | null; expectedTree: string; entries?: { path: string; operation: "add" | "modify" | "delete"; before_digest: Digest | null; after_digest: Digest | null }[]; diffBytes?: number; postcondition?: boolean }) {
   const mutating = (input.entries ?? []).length > 0;
   return buildFinalizationCommand({
     command_id: "command-finalize-1",
@@ -59,7 +64,9 @@ async function finalizeCommand(input: { base: string; target: string; sourceComm
     mutation_scope: mutating
       ? { mutation_type: "local_patch", allowed_path_prefixes: ["src"], max_files: 8, max_diff_bytes: 8192, prohibited_changes: [] }
       : { mutation_type: "no_change_close", allowed_path_prefixes: [], max_files: 0, max_diff_bytes: 0, prohibited_changes: [] },
-    expected_post_state: { kind: "digest", digest: input.expectedTree },
+    expected_post_state: input.postcondition
+      ? { kind: "postcondition", predicate: "target.tree == verified artifact tree", predicate_digest: digest }
+      : { kind: "digest", digest: input.expectedTree },
     adapter_operation: mutating ? "git_fast_forward" : "git_no_change_close",
     idempotency_key: "finalize-key-1",
     action_authority: { authority_id: "authority-1", authority_digest: digest },
@@ -69,7 +76,10 @@ async function finalizeCommand(input: { base: string; target: string; sourceComm
   });
 }
 
-describe("GitFastForwardFinalizer", () => {
+// Each case drives a real `git` subprocess against a fresh temp repository, so these are I/O bound
+// and exceed the suite's 5s default on Windows. The timeout is raised for this describe block only;
+// no assertion is relaxed.
+describe("GitFastForwardFinalizer", { timeout: 30_000 }, () => {
   test("clean fast-forward lands the source commit and lookup proves the expected post-state", async () => {
     const root = await repo();
     const base = await commitFile(root, "base.txt", "base", "base");
@@ -184,5 +194,50 @@ describe("GitFastForwardFinalizer", () => {
     expect(await finalizer.apply(command)).toMatchObject({ status: "applied" });
     expect(await finalizer.lookup(command)).toMatchObject({ status: "applied", post_state_digest: expectedTree });
     expect(await git(root, "rev-parse", "target")).toBe(base);
+  });
+
+  // The spec requires the finalization receipt prove "the observed post-state matches the bound
+  // digest OR deterministic postcondition". This finalizer can only observe a tree digest; it has
+  // no predicate evaluator, so a postcondition post-state is unverifiable here and must fail
+  // closed rather than be silently accepted as applied.
+  test("an unverifiable postcondition post-state is rejected, never silently applied", async () => {
+    const root = await repo();
+    const base = await commitFile(root, "base.txt", "base", "base");
+    await git(root, "checkout", "-q", "-b", "target", base);
+    const source = await commitFile(root, join("src", "feature.txt"), "feature", "feature");
+    const expectedTree = await git(root, "rev-parse", "HEAD^{tree}");
+    await git(root, "checkout", "-q", "main");
+    await git(root, "branch", "-f", "target", base);
+
+    const finalizer = new GitFastForwardFinalizer({ repoPath: root, ref: "refs/heads/target" });
+    const command = await finalizeCommand({
+      base,
+      target: base,
+      sourceCommit: source,
+      expectedTree,
+      entries: [{ path: "src/feature.txt", operation: "add", before_digest: null, after_digest: digest }],
+      diffBytes: 32,
+      postcondition: true,
+    });
+
+    expect(await finalizer.preflight(command)).toMatchObject({ status: "rejected" });
+    expect(await finalizer.apply(command)).toMatchObject({ status: "rejected" });
+    expect(await finalizer.lookup(command)).toMatchObject({ status: "not_applied" });
+    // The target ref must not have moved.
+    expect(await git(root, "rev-parse", "target")).toBe(base);
+  });
+
+  test("an unverifiable postcondition post-state is rejected for a no-change close", async () => {
+    const root = await repo();
+    const base = await commitFile(root, "base.txt", "base", "base");
+    await git(root, "branch", "target", base);
+    const expectedTree = await git(root, "rev-parse", `${base}^{tree}`);
+
+    const finalizer = new GitFastForwardFinalizer({ repoPath: root, ref: "refs/heads/target" });
+    const command = await finalizeCommand({ base, target: base, sourceCommit: base, expectedTree, postcondition: true });
+
+    expect(await finalizer.preflight(command)).toMatchObject({ status: "rejected" });
+    expect(await finalizer.apply(command)).toMatchObject({ status: "rejected" });
+    expect(await finalizer.lookup(command)).toMatchObject({ status: "not_applied" });
   });
 });

@@ -18,6 +18,40 @@ const executableBytes = Buffer.from("sealed Hermes launcher");
 const executableSha256 = createHash("sha256").update(executableBytes).digest("hex");
 const observedAt = "2026-08-04T13:14:15.123Z";
 
+// A complete, schema-valid CEOInputRequestV1 for board-projection tests. `Needs you` is reserved for
+// an active typed request, so these tests need a request that really parses — an approximate object
+// would pass the lane assertion for the wrong reason.
+const boardTaskId = "task-1";
+function boardApprovalRequest(overrides: Record<string, unknown> = {}) {
+  const taskSpecDigest = canonicalDigest({ task_spec: boardTaskId });
+  const mandateDigest = canonicalDigest({ mandate: boardTaskId });
+  return {
+    schema_version: "agentdash.ceo-input-request/v1",
+    task_id: boardTaskId,
+    task_spec_revision: 0,
+    task_spec_digest: taskSpecDigest,
+    active_mandate_id: null,
+    proposed_mandate_id: "mandate-1",
+    proposed_mandate_digest: mandateDigest,
+    decision_type: "initial_mandate_approval",
+    proposed_diff: { digest: canonicalDigest({ task_spec_digest: taskSpecDigest, mandate_digest: mandateDigest }), summary: "activate mandate" },
+    proposed_limits: { max_cost_usd: 2, max_runtime_ms: 2_000, max_attempts: 2, max_provider_tokens: 400 },
+    proposed_route_ids: [],
+    proposed_side_effects: [],
+    rationale: "approval required",
+    evidence_refs: ["evidence-1"],
+    completed_attempt_receipt_ids: [],
+    no_unapproved_action_running: true,
+    created_at: "2026-08-04T12:00:00.000Z",
+    expires_at: "2026-08-04T14:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function boardTaskRow(ceoInput: unknown, status = "blocked", title = "Approve release") {
+  return { task_id: boardTaskId, title, body: "Review the proposed release.", status, priority: 1, created_at: 1, updated_at: observedAt, request_digest: "a".repeat(64), revision: 2, ceo_input: ceoInput, ceo_input_digest: "b".repeat(64), terminal_state: "nonterminal", terminal_intent: null, terminal_intent_digest: null, terminal_receipt_digest: null, runs: [] };
+}
+
 function options(resultFor: (operation: string, payload: any) => unknown) {
   const runner = vi.fn(async (command: CommandOptions) => {
     const request = JSON.parse(command.stdin ?? "null");
@@ -282,14 +316,49 @@ describe("HermesKanbanAdapter", () => {
   });
 
   test("projects exact controller rows into CEO board lanes without leaking transport rows", async () => {
-    const task = { task_id: "task-1", title: "Approve release", body: "Review the proposed release.", status: "blocked", priority: 1, created_at: 1, updated_at: observedAt, request_digest: "a".repeat(64), revision: 2, ceo_input: { question: "Approve?" }, ceo_input_digest: "b".repeat(64), terminal_state: "nonterminal", terminal_intent: null, terminal_intent_digest: null, terminal_receipt_digest: null, runs: [] };
+    // An ACTIVE typed CEOInputRequestV1 is the only thing that earns the Needs you lane.
+    const task = boardTaskRow(boardApprovalRequest());
     const { adapter } = options(() => ({ generated_at: observedAt, tasks: [task], archived_count: 0 }));
 
     const board = await adapter.projectBoard();
     expect(board.lanes.needs_you).toHaveLength(1);
     expect(board.lanes.ready).toEqual([]);
-    expect(board.lanes.needs_you[0]).toMatchObject({ redacted: true, summary: "Approve release — blocked" });
+    expect(board.lanes.needs_you[0]).toMatchObject({ redacted: true });
     expect(board.lanes.needs_you[0]).not.toHaveProperty("body");
+  });
+
+  // `Needs you` is reserved for an ACTIVE TYPED CEOInputRequestV1. A bridge row carrying some
+  // untyped or expired ceo_input value must not create a CEO review pause — the plan's superseded
+  // review-pause concept must be absent, not renamed.
+  test("an untyped ceo_input value never routes a task into Needs you", async () => {
+    const task = boardTaskRow({ question: "Approve?" });
+    const { adapter } = options(() => ({ generated_at: observedAt, tasks: [task], archived_count: 0 }));
+
+    const board = await adapter.projectBoard();
+    expect(board.lanes.needs_you).toEqual([]);
+    // Terminal-less blocked with no valid CEO request is Stopped, not Needs you.
+    expect(board.lanes.stopped).toHaveLength(1);
+  });
+
+  test("an expired typed CEO input request does not hold a task in Needs you", async () => {
+    // Identical to the valid request except that it already expired at the observation time.
+    const expired = boardApprovalRequest({ created_at: "2026-08-01T00:00:00.000Z", expires_at: "2026-08-01T01:00:00.000Z" });
+    const task = boardTaskRow(expired);
+    const { adapter } = options(() => ({ generated_at: observedAt, tasks: [task], archived_count: 0 }));
+
+    const board = await adapter.projectBoard();
+    expect(board.lanes.needs_you).toEqual([]);
+    expect(board.lanes.stopped).toHaveLength(1);
+  });
+
+  test("archived rows are hidden from every lane and only counted", async () => {
+    const task = boardTaskRow(null, "archived", "Old work");
+    const { adapter } = options(() => ({ generated_at: observedAt, tasks: [task], archived_count: 1 }));
+
+    const board = await adapter.projectBoard();
+    const total = Object.values(board.lanes).reduce((sum, lane) => sum + lane.length, 0);
+    expect(total).toBe(0);
+    expect(board.archived_count).toBe(1);
   });
 
   test("refuses an executable whose current bytes no longer match the reviewed launcher", async () => {

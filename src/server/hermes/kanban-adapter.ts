@@ -37,6 +37,7 @@ import {
   type TerminalIntentInput,
 } from "../../lib/mission-control/contracts";
 import type { HermesPort } from "../mission-control/ports";
+import { buildBoardProjection, HermesBoardSnapshotV1Schema } from "../mission-control/read-model";
 
 import { createCommandRunner, type CommandOptions, type CommandResult } from "./command";
 
@@ -193,17 +194,31 @@ export class HermesKanbanAdapter implements HermesPort {
   async setCEOInput(input: SetCEOInputInput): Promise<void> { await this.invoke("ceo-input-set", input, CEOInputRawSchema); }
   async commitTerminalIntent(input: TerminalIntentInput): Promise<void> { await this.invoke("terminal-intent", input, TerminalRawSchema); }
 
+  // The CEO lane mapping is locked by the approved design and implemented once, in the read model's
+  // pure `buildBoardProjection`. This adapter only translates bridge rows into the canonical
+  // snapshot shape and delegates, so `Needs you` stays reserved for an active typed
+  // CEOInputRequestV1, archived rows stay hidden, and the two projections cannot drift apart.
   async projectBoard(): Promise<MissionControlBoardV1> {
     const raw = await this.invoke("project-board", {}, BoardRawSchema);
-    const lanes: MissionControlBoardV1["lanes"] = { ready: [], working: [], needs_you: [], stopped: [], completed: [] };
-    for (const task of raw.tasks) {
-      const payload = boardPayload(task);
-      if (task.status === "done") lanes.completed.push(payload);
-      else if (task.ceo_input !== null) lanes.needs_you.push(payload);
-      else if (task.status === "in_progress") lanes.working.push(payload);
-      else if (task.status === "blocked") lanes.stopped.push(payload);
-      else lanes.ready.push(payload);
-    }
-    return MissionControlBoardV1Schema.parse({ generated_at: raw.generated_at, lanes, archived_count: raw.archived_count, unavailable_reason: null });
+    // Bridge rows are untrusted transport values, so the canonical snapshot schema validates them
+    // here (unknown state strings and malformed ids fail closed) rather than being asserted across
+    // the boundary.
+    const snapshot = HermesBoardSnapshotV1Schema.parse({
+      generated_at: raw.generated_at,
+      unavailable_reason: null,
+      tasks: raw.tasks.map((task) => ({
+        task_id: task.task_id,
+        title: task.title,
+        detail: boardPayload(task).summary,
+        state: task.status,
+        attempt: null,
+        ceo_input: task.ceo_input,
+        task_outcome: task.terminal_intent,
+      })),
+    });
+    const board = buildBoardProjection(snapshot, { reconciliation_pending_task_ids: [] });
+    // The bridge reports the authoritative archived count over the whole board, including rows the
+    // observation window did not return.
+    return MissionControlBoardV1Schema.parse({ ...board, archived_count: raw.archived_count });
   }
 }
