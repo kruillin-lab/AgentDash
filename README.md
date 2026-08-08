@@ -43,6 +43,11 @@ A local, dopamine-grade mission control dashboard for **OpenCode** and your othe
 - Renders every agent the dashboard knows about, grouped by kind (primary / native / extensible).
 - Extend by creating `~/.agentdash/agents.json` with an array of agent entries. Overrides built-ins by `id` or adds new ones.
 
+### Mission Control (`/`) — CEO workspace
+- A local, single-operator CEO workspace where a capability-isolated Hermes project manager turns conversation into durable Hermes cards, and a deterministic AgentDash controller carries each activated task through bounded CodeG execution, remediation, independent verification, and exact finalization to a truthful terminal outcome.
+- The board projects five lanes (Ready / Working / Needs you / Stopped / Completed) from canonical Hermes state; the read-only inspector surfaces original worker activity (Live/Files/Checks/Receipt) and the exact native CodeG session when proven.
+- **Production dispatch is disabled by default.** The dispatch gate (`MISSION_CONTROL_DISPATCH=disabled|qualification|candidate|enabled`) fails closed; promotion requires the full proof conjunction via `scripts/mission-control/promote-gates.mjs`. See `docs/operations/mission-control-runbook.md`.
+
 ## Run
 
 ```powershell
