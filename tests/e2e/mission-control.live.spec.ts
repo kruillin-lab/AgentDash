@@ -22,10 +22,10 @@ test.describe("CEO mission control lifecycle (live, opt-in)", () => {
     }
   });
 
+  // Reaching this body already requires MISSION_CONTROL_LIVE_E2E=1 and every credential in
+  // REQUIRED_ENV, so the opt-in gates above are the only skips. An additional unconditional skip
+  // would make the assertion unreachable even for a fully configured operator run.
   test("a complete harmless approval path reaches done on a disposable board", async ({ page }) => {
-    // This scenario is only meaningful against real disposable candidate
-    // services. It is skipped unless explicitly opted in with credentials.
-    test.skip(true, "Live candidate services are not configured in this environment.");
     await page.goto("/");
     await expect(page.getByRole("region", { name: "Completed" })).toBeVisible();
   });

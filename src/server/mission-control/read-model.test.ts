@@ -155,10 +155,13 @@ describe("buildBoardProjection", () => {
     expect(board.lanes.needs_you).toHaveLength(0);
     expect(board.lanes.completed).toHaveLength(0);
     // The design mandates this exact user-visible text: "the UI says **Stopped — reconciliation
-    // pending**". Assert the literal sentence, not a loose substring.
-    expect(board.lanes.stopped.map((item) => item.summary)).toEqual(expect.arrayContaining([
-      expect.stringContaining("Stopped — reconciliation pending"),
-    ]));
+    // pending**". Assert the literal rendered sentence, not a loose substring.
+    // Assert the rendered card detail itself, not a substring of the redacted JSON envelope.
+    const details = board.lanes.stopped.map((item) => (JSON.parse(item.summary) as { detail: string }).detail);
+    // Exactly the two overlay tasks end with the mandated sentence verbatim.
+    expect(details.filter((detail) => detail.endsWith("Stopped — reconciliation pending."))).toHaveLength(2);
+    // A task Stopped for a terminal reason must NOT claim reconciliation is pending.
+    expect(details).toContain("Hermes bridge is unavailable");
   });
 });
 
