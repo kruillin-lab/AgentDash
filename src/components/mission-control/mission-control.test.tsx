@@ -8,6 +8,9 @@ import {
   MissionControlServedBoardV1Schema,
   type MissionControlServedBoardV1,
 } from "../../lib/mission-control/board-view";
+import { AttemptInspector } from "./AttemptInspector";
+import { projectActivity } from "../../server/mission-control/activity/projector";
+import { CodeGBindingV1Schema } from "../../lib/mission-control/contracts";
 
 let MissionControlShell: (typeof import("./MissionControlShell"))["MissionControlShell"];
 
@@ -182,5 +185,50 @@ describe("MissionControlShell", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(screen.queryByRole("button", { name: /New mandate/i })).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Attempt activity and native session", () => {
+  const inspectorCard = { schema_version: "agentdash.mission-control-card-view/v1" as const, task_id: "task-1" as never, title: "Build dashboard", detail: "Agent is implementing", attempt: "Attempt 2" };
+  const binding = CodeGBindingV1Schema.parse({ work_task_id: "work-task-1", run_sequence: 1, conversation_id: "conversation-1", connection_id: "connection-1", harness_session_id: "session-1", folder_id: "folder-1" });
+  const redacted = (summary: string) => ({ redacted: true as const, digest: digest as import("../../lib/mission-control/contracts").Digest, summary });
+
+  test("a model-backed action exposes its exact native CodeG URI", () => {
+    const exactNativeUri = "codeg://session/session-1";
+    render(<AttemptInspector card={inspectorCard} session={{ kind: "available", uri: exactNativeUri }} />);
+
+    expect(screen.getByRole("link", { name: "Open in CodeG" }).getAttribute("href")).toBe(exactNativeUri);
+  });
+
+  test("before CodeG supplies a usable URI the button reads No session yet and is disabled", () => {
+    render(<AttemptInspector card={inspectorCard} session={{ kind: "not_yet" }} />);
+
+    expect(screen.getByRole("button", { name: "No session yet" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("link", { name: "Open in CodeG" })).toBeNull();
+  });
+
+  test("a deterministic action says No worker session for this action", () => {
+    render(<AttemptInspector card={inspectorCard} session={{ kind: "not_applicable" }} />);
+
+    expect(screen.getByText("No worker session for this action.")).not.toBeNull();
+    expect(screen.queryByRole("link", { name: "Open in CodeG" })).toBeNull();
+  });
+
+  test("the activity tabs render original items and honest empty states", async () => {
+    const user = userEvent.setup();
+    const page = projectActivity(binding, [], [
+      { cursor: "1", observed_at: "2026-08-06T12:00:00.000Z", kind: "message", payload: redacted("starting work") },
+      { cursor: "2", observed_at: "2026-08-06T12:01:00.000Z", kind: "file_changed", payload: redacted("src/a.ts") },
+      { cursor: "3", observed_at: "2026-08-06T12:02:00.000Z", kind: "check", payload: redacted("lint passed") },
+    ]);
+    render(<AttemptInspector card={inspectorCard} session={{ kind: "available", uri: "codeg://session/session-1" }} activity={page} />);
+
+    expect(screen.getByRole("tabpanel").textContent).toContain("starting work");
+    await user.click(screen.getByRole("tab", { name: "Files" }));
+    expect(screen.getByRole("tabpanel").textContent).toContain("src/a.ts");
+    await user.click(screen.getByRole("tab", { name: "Checks" }));
+    expect(screen.getByRole("tabpanel").textContent).toContain("lint passed");
+    await user.click(screen.getByRole("tab", { name: "Receipt" }));
+    expect(screen.getByRole("tabpanel").textContent).toContain("No receipt yet");
   });
 });
