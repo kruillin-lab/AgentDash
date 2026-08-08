@@ -1,4 +1,5 @@
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path, { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,7 +22,7 @@ const SHA256 = /^[a-f0-9]{64}$/i;
 const COMMIT = /^[a-f0-9]{40}$/i;
 const MODES = ["disabled", "qualification", "candidate", "enabled"];
 
-export function evaluatePromotion(snapshot, targetMode) {
+export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
   const reasons = [];
   if (!MODES.includes(targetMode)) reasons.push(`Unknown target dispatch mode: ${String(targetMode)}.`);
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
@@ -44,6 +45,19 @@ export function evaluatePromotion(snapshot, targetMode) {
   // The snapshot's own dispatch conjunction must be go, not no_go.
   if (snapshot.dispatch?.status !== "go") reasons.push("The gate conjunction is not go; a partial conjunction cannot be promoted.");
 
+  // Evidence must still be current AT PROMOTION TIME, not merely when it was
+  // generated. An expired proof cannot authorize a new action, and promoting a
+  // stale snapshot would write a record the runtime immediately rejects while
+  // this command reported success.
+  if (typeof snapshot.expires_at === "string" && Date.parse(snapshot.expires_at) <= now) {
+    reasons.push("The gate snapshot has expired; refresh the evidence before promoting.");
+  }
+  for (const proof of proofs) {
+    if (typeof proof?.expires_at === "string" && Date.parse(proof.expires_at) <= now) {
+      reasons.push(`Expired evidence for ${proof?.gate_id ?? "unknown gate"}; refresh the evidence before promoting.`);
+    }
+  }
+
   const manifest_digest = snapshot ? sha256(canonicalJson(snapshot)) : null;
   return { ready: reasons.length === 0, reasons: [...new Set(reasons)], manifest_digest };
 }
@@ -59,10 +73,33 @@ export function evaluatePromotion(snapshot, targetMode) {
 // missing qualification receipt throws instead of producing a manifest.
 // ---------------------------------------------------------------------------
 
+/**
+ * Record WHICH command the operator ran without persisting machine-local paths.
+ * Flag names stay auditable; any value that looks like a filesystem path is
+ * replaced by a marker, so a digest-addressed manifest never bakes in a home
+ * directory, username, or an accidentally pasted credential-bearing argument.
+ */
+export function redactOperatorCommand(command) {
+  return String(command)
+    .split(/\s+/)
+    .map((token) => {
+      const separator = token.indexOf("=");
+      if (separator > 0) {
+        const flag = token.slice(0, separator);
+        const value = token.slice(separator + 1);
+        // Bare enum-like values (a dispatch mode) are safe to keep verbatim.
+        return MODES.includes(value) ? token : `${flag}=[redacted]`;
+      }
+      // A positional token that looks like a path is redacted; flags are kept.
+      return token.startsWith("--") || token === "promote-gates" ? token : "[redacted]";
+    })
+    .join(" ");
+}
+
 export function buildPromotionManifest(input) {
   const { snapshot, target_mode, current_mode, operator_command, qualification_receipts, now } = input ?? {};
 
-  const evaluation = evaluatePromotion(snapshot, target_mode);
+  const evaluation = evaluatePromotion(snapshot, target_mode, Date.parse(now));
   if (!evaluation.ready) {
     throw new Error(`PromotionManifestV1 cannot bind an unproven conjunction: ${evaluation.reasons.join(" ")}`);
   }
@@ -101,7 +138,7 @@ export function buildPromotionManifest(input) {
     schema_version: "agentdash.promotion-manifest/v1",
     current_mode,
     target_mode,
-    operator_command,
+    operator_command: redactOperatorCommand(operator_command),
     gate_evidence: gateEvidence,
     qualification_receipts: receipts,
     snapshot_digest: evaluation.manifest_digest,
@@ -162,10 +199,38 @@ export async function readDispatchMode(stateDir, now = Date.now()) {
  * Atomically apply one promotion: same-volume temp write, flush, then rename over
  * the durable record. The manifest is written beside it as immutable evidence.
  */
-export async function commitDispatchMode(stateDir, manifest) {
+export async function commitDispatchMode(stateDir, manifest, expectedCurrentMode = null, now = Date.now()) {
   const dir = join(stateDir, "dispatch");
   await mkdir(dir, { recursive: true });
 
+  // Close the read-then-write window. Exclusive creation is atomic, so exactly one
+  // concurrent promotion holds the lock; the loser fails loudly instead of silently
+  // overwriting a promotion the other operator was just told had succeeded.
+  const lockPath = join(dir, "promote.lock");
+  let lock;
+  try {
+    lock = await open(lockPath, fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY, 0o600);
+  } catch (error) {
+    if (error?.code === "EEXIST") throw new Error("Another promotion is in progress; the dispatch mode was not changed.");
+    throw error;
+  }
+
+  try {
+    // Re-verify the compare-and-set while holding the lock: the stored mode may have
+    // changed between the caller's read and this commit.
+    if (expectedCurrentMode !== null) {
+      const observed = await readDispatchMode(stateDir, now);
+      const transition = evaluateModeTransition({ stored_mode: observed, expected_current_mode: expectedCurrentMode, target_mode: manifest.target_mode });
+      if (!transition.ok) throw new Error(transition.reason);
+    }
+    return await writeDispatchRecords(dir, manifest);
+  } finally {
+    await lock.close();
+    await rm(lockPath, { force: true });
+  }
+}
+
+async function writeDispatchRecords(dir, manifest) {
   const record = { schema_version: "agentdash.dispatch-mode/v1", mode: manifest.target_mode, manifest_digest: manifest.manifest_digest, promoted_at: manifest.created_at, expires_at: manifest.expires_at };
   const temporary = join(dir, `mode.${manifest.manifest_digest.slice(0, 16)}.tmp`);
   const handle = await open(temporary, "w", 0o600);
@@ -292,7 +357,7 @@ async function main(argv) {
     return;
   }
 
-  const written = await commitDispatchMode(stateDir, manifest);
+  const written = await commitDispatchMode(stateDir, manifest, expectedCurrentMode);
   console.log(`Mission Control promotion: ${manifest.current_mode} -> ${manifest.target_mode}`);
   console.log(`Manifest digest: ${manifest.manifest_digest}`);
   console.log(`Durable mode: ${written.mode_path}`);

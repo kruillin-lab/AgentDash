@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
-import { acceptDispatchRecord, buildPromotionManifest, evaluateModeTransition, evaluatePromotion } from "../promote-gates.mjs";
+import { acceptDispatchRecord, buildPromotionManifest, commitDispatchMode, evaluateModeTransition, evaluatePromotion, readDispatchMode } from "../promote-gates.mjs";
 
 const GATE_IDS = [
   "agentdash_local_authority", "hermes_atomicity", "codeg_replay_safety", "pm_isolation",
@@ -29,7 +32,9 @@ test("a partial manifest is rejected with a missing-gate reason", () => {
 });
 
 test("a full go conjunction with verified digests and commits is ready", () => {
-  const result = evaluatePromotion(fullSnapshot(), "enabled");
+  // Pin the clock: the fixture's proofs are only valid inside their own window, and
+  // promotion now verifies evidence is still current at promotion time.
+  const result = evaluatePromotion(fullSnapshot(), "enabled", Date.parse("2026-08-06T12:05:00.000Z"));
   assert.equal(result.ready, true);
   assert.equal(result.reasons.length, 0);
   assert.match(result.manifest_digest, /^[a-f0-9]{64}$/i);
@@ -182,4 +187,102 @@ test("an unknown mode is not authority", () => {
 
 test("a non-object record is not authority", () => {
   for (const raw of [null, undefined, 7, "enabled", []]) assert.equal(acceptDispatchRecord(raw), null);
+});
+
+// ---------------------------------------------------------------------------
+// Stale evidence cannot be promoted
+//
+// "An expired proof makes the route unavailable for new actions" and promotion
+// must not manufacture evidence. A snapshot whose proofs have expired by the time
+// --promote runs would otherwise write a durable record the runtime immediately
+// rejects, while the CLI reported success.
+// ---------------------------------------------------------------------------
+
+test("a snapshot that has expired by promotion time is rejected", () => {
+  const stale = fullSnapshot();
+  stale.expires_at = "2020-01-01T00:00:00.000Z";
+  stale.proofs = stale.proofs.map((p) => ({ ...p, expires_at: "2020-01-01T00:00:00.000Z" }));
+  const result = evaluatePromotion(stale, "enabled", Date.parse("2026-08-06T12:00:00.000Z"));
+  assert.equal(result.ready, false);
+  assert.match(result.reasons.join(" "), /expired|stale/i);
+});
+
+test("a snapshot still inside its validity window is accepted", () => {
+  const fresh = fullSnapshot();
+  const result = evaluatePromotion(fresh, "enabled", Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(result.ready, true);
+});
+
+test("buildPromotionManifest refuses stale evidence", () => {
+  const input = manifestInput();
+  input.snapshot.expires_at = "2020-01-01T00:00:00.000Z";
+  input.snapshot.proofs = input.snapshot.proofs.map((p) => ({ ...p, expires_at: "2020-01-01T00:00:00.000Z" }));
+  assert.throws(() => buildPromotionManifest(input), /expired|stale/i);
+});
+
+// ---------------------------------------------------------------------------
+// The operator command is redacted before it is persisted
+//
+// "Do not place secrets in prompts, Kanban bodies, comments, attachments,
+// AgentBrain, logs, or receipts." The manifest must record WHICH command ran
+// without baking absolute local paths into a durable digest-addressed artifact.
+// ---------------------------------------------------------------------------
+
+test("the operator command records flags without absolute local paths", () => {
+  const manifest = buildPromotionManifest(manifestInput({
+    operator_command: "promote-gates --mode=enabled --evidence=C:\Users\someone\evidence\snap.json --promote",
+  }));
+  assert.doesNotMatch(manifest.operator_command, /C:\\Users|\/home\//i);
+  assert.doesNotMatch(manifest.operator_command, /someone/i);
+  // The flag itself is still auditable, with its value redacted.
+  assert.match(manifest.operator_command, /--mode=enabled/);
+  assert.match(manifest.operator_command, /--evidence=/);
+  assert.match(manifest.operator_command, /--promote/);
+});
+
+// ---------------------------------------------------------------------------
+// The compare-and-set is atomic against a concurrent promotion
+//
+// A reviewer reproduced two concurrent --promote runs both passing the CAS check
+// and the later rename silently winning, discarding a promotion the other
+// operator had just been told succeeded. Exactly one may commit.
+// ---------------------------------------------------------------------------
+
+test("two concurrent promotions from the same mode: exactly one commits", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-cas-"));
+  try {
+    const manifestFor = (mode) => buildPromotionManifest(manifestInput({ target_mode: mode }));
+    // Seed the starting state both racers believe is current.
+    await commitDispatchMode(stateDir, manifestFor("candidate"), "disabled", Date.parse("2026-08-06T12:06:00.000Z"));
+    const settled = await Promise.allSettled([
+      commitDispatchMode(stateDir, manifestFor("enabled"), "candidate", Date.parse("2026-08-06T12:06:00.000Z")),
+      commitDispatchMode(stateDir, manifestFor("qualification"), "candidate", Date.parse("2026-08-06T12:06:00.000Z")),
+    ]);
+
+    const winners = settled.filter((r) => r.status === "fulfilled");
+    const losers = settled.filter((r) => r.status === "rejected");
+    assert.equal(winners.length, 1, "exactly one promotion may commit");
+    assert.equal(losers.length, 1, "the loser must fail loudly, never silently");
+
+    // The durable record matches the winner, and the loser changed nothing.
+    const stored = await readDispatchMode(stateDir, Date.parse("2026-08-06T12:06:00.000Z"));
+    assert.ok(["enabled", "qualification"].includes(stored));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a stale expected mode is rejected at commit time, not just at read time", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-cas-"));
+  try {
+    // The store already holds `candidate`...
+    await commitDispatchMode(stateDir, buildPromotionManifest(manifestInput({ target_mode: "candidate" })), "disabled", Date.parse("2026-08-06T12:06:00.000Z"));
+    // ...so a commit that still believes `disabled` must be refused.
+    await assert.rejects(
+      commitDispatchMode(stateDir, buildPromotionManifest(manifestInput({ target_mode: "enabled" })), "disabled", Date.parse("2026-08-06T12:06:00.000Z")),
+      /compare-and-set|current mode/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
 });

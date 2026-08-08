@@ -117,6 +117,17 @@ Promotion is a real **compare-and-set** over a durable record under
   the mode transition, the timestamp, and the expiry inherited from the
   snapshot's earliest proof expiry.
 - A no-op transition to the mode already stored is rejected.
+- The commit takes an exclusive `dispatch/promote.lock` and re-verifies the
+  expected mode while holding it, so two concurrent promotions cannot both
+  succeed. The loser fails with a compare-and-set reason rather than silently
+  overwriting the winner. If a crash leaves a stale lock, remove
+  `dispatch/promote.lock` and re-run.
+- Evidence must still be current **at promotion time**. A snapshot whose
+  proofs have expired since it was generated is refused with a per-gate reason;
+  refresh with `refresh-gates.mjs` first.
+- `operator_command` in the manifest records the flags that ran with path values
+  redacted, so a digest-addressed artifact never bakes in a home directory,
+  username, or an accidentally pasted credential-bearing argument.
 
 Neither the record nor the manifest is committed: both are machine-local state.
 

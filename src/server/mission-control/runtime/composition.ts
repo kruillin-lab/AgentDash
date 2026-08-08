@@ -38,7 +38,10 @@ function stateDirFromEnv(): string | null {
 async function readPromotedDispatchMode(stateDir: string): Promise<DispatchMode | null> {
   try {
     const raw: unknown = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
-    if (typeof raw !== "object" || raw === null) return null;
+    // Same acceptance rules as promote-gates.mjs::acceptDispatchRecord, including
+    // the array rejection, so the CLI's --expect-current can never compare against
+    // a mode the runtime would not grant.
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
     const record = raw as { mode?: unknown; manifest_digest?: unknown; expires_at?: unknown };
     // A promotion never outlives the evidence that justified it.
     if (typeof record.expires_at === "string" && Date.parse(record.expires_at) <= Date.now()) return null;
