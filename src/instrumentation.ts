@@ -1,6 +1,6 @@
 import "server-only";
 
-import { parseDispatchMode } from "./server/mission-control/runtime/controller";
+import { parseDispatchMode } from "./server/mission-control/runtime/dispatch-mode";
 
 // ---------------------------------------------------------------------------
 // Next.js server instrumentation

@@ -1,55 +1,25 @@
 import "server-only";
 
-import { z } from "zod";
-
+import type { ExactRouteV1, FinalizationCommandV1 } from "../../../lib/mission-control/contracts";
 import { chooseContinuation, type ContinuationDecisionV1, type ContinuationInput } from "../controller/continuation";
+import { buildFinalizationCommand, type BuildFinalizationCommandInput } from "../finalization/command";
+import { proveVerifierIndependence, type IndependenceTier, type VerifierCandidate, type VerifierIndependenceProof } from "../verification/independence";
 import type { ActionCommandAdvanceResult } from "./action-command";
+import {
+  DispatchModeSchema,
+  gateDecision,
+  parseDispatchMode,
+  type ControllerWorkKind,
+  type DispatchGateDecision,
+  type DispatchMode,
+} from "./dispatch-mode";
 import type { RecoveryOutbox } from "./outbox";
 import type { ControllerOwner, OwnerLease } from "./owner-lock";
 
-// ---------------------------------------------------------------------------
-// Dispatch mode
-//
-// Production dispatch stays disabled until the Task 17 promotion manifest
-// proves every gate. The four modes are exhaustive; anything unrecognized
-// fails closed to `disabled`.
-// ---------------------------------------------------------------------------
-
-export const DispatchModeSchema = z.enum(["disabled", "qualification", "candidate", "enabled"]);
-export type DispatchMode = z.infer<typeof DispatchModeSchema>;
-
-export function parseDispatchMode(raw: unknown): DispatchMode {
-  const parsed = DispatchModeSchema.safeParse(raw);
-  return parsed.success ? parsed.data : "disabled";
-}
-
-// ---------------------------------------------------------------------------
-// Controller work kinds and the dispatch gate
-//
-//  - model_backed:  normal chat/board model dispatch (requires `enabled`)
-//  - qualification: operator-signed canary/evaluation envelopes on disposable
-//                   resources (requires `qualification` or `enabled`)
-//  - candidate:     deterministic/no-model fixtures on production controller
-//                   paths (requires `candidate` or `enabled`)
-// ---------------------------------------------------------------------------
-
-export type ControllerWorkKind = "model_backed" | "qualification" | "candidate";
-
-export type DispatchGateDecision = Readonly<{ allowed: boolean; reason: string }>;
-
-function gateDecision(mode: DispatchMode, kind: ControllerWorkKind): DispatchGateDecision {
-  if (mode === "enabled") return { allowed: true, reason: "Production dispatch is enabled." };
-  if (mode === "disabled") return { allowed: false, reason: "Mission control dispatch is disabled." };
-  if (mode === "qualification") {
-    return kind === "qualification"
-      ? { allowed: true, reason: "Operator-signed qualification envelope on disposable resources." }
-      : { allowed: false, reason: "Qualification mode accepts only signed qualification envelopes." };
-  }
-  // candidate
-  return kind === "candidate"
-    ? { allowed: true, reason: "Deterministic no-model candidate fixture." }
-    : { allowed: false, reason: "Candidate mode accepts only deterministic no-model fixtures." };
-}
+// The dispatch-mode gate lives in the edge-safe `./dispatch-mode` module so
+// instrumentation can read it without bundling this Node-only controller.
+export { DispatchModeSchema, parseDispatchMode };
+export type { ControllerWorkKind, DispatchGateDecision, DispatchMode };
 
 // ---------------------------------------------------------------------------
 // MissionControlController
@@ -125,5 +95,22 @@ export class MissionControlController {
    */
   continueTask(input: ContinuationInput): ContinuationDecisionV1 {
     return chooseContinuation(input);
+  }
+
+  /**
+   * Prove a verifier is independent of the realized mutating-route set for the
+   * mandate's minimum tier. Pure and deterministic; a remediation that mutates
+   * the artifact grows the realized set and invalidates earlier verification.
+   */
+  proveVerifierIndependence(realizedRoutes: ExactRouteV1[], candidate: VerifierCandidate, tier: IndependenceTier): VerifierIndependenceProof {
+    return proveVerifierIndependence(realizedRoutes, candidate, tier);
+  }
+
+  /**
+   * Build the strict FinalizationCommandV1 after successful verification. Pure
+   * planner; the only mutation seam is the FinalizationPort, never this method.
+   */
+  buildFinalizationCommand(input: BuildFinalizationCommandInput): FinalizationCommandV1 {
+    return buildFinalizationCommand(input);
   }
 }
