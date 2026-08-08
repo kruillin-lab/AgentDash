@@ -24,6 +24,10 @@ const MODES = ["disabled", "qualification", "candidate", "enabled"];
 
 export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
   const reasons = [];
+  // `Date.parse(x) <= NaN` is always false, so an unparseable clock would silently
+  // disable every expiry check below. Fail closed to the real clock instead: this
+  // function is exported, so its safety cannot depend on caller discipline.
+  const effectiveNow = Number.isFinite(now) ? now : Date.now();
   if (!MODES.includes(targetMode)) reasons.push(`Unknown target dispatch mode: ${String(targetMode)}.`);
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     return { ready: false, reasons: ["Missing gate snapshot; promotion cannot be evaluated."], manifest_digest: null };
@@ -49,11 +53,11 @@ export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
   // generated. An expired proof cannot authorize a new action, and promoting a
   // stale snapshot would write a record the runtime immediately rejects while
   // this command reported success.
-  if (typeof snapshot.expires_at === "string" && Date.parse(snapshot.expires_at) <= now) {
+  if (typeof snapshot.expires_at === "string" && Date.parse(snapshot.expires_at) <= effectiveNow) {
     reasons.push("The gate snapshot has expired; refresh the evidence before promoting.");
   }
   for (const proof of proofs) {
-    if (typeof proof?.expires_at === "string" && Date.parse(proof.expires_at) <= now) {
+    if (typeof proof?.expires_at === "string" && Date.parse(proof.expires_at) <= effectiveNow) {
       reasons.push(`Expired evidence for ${proof?.gate_id ?? "unknown gate"}; refresh the evidence before promoting.`);
     }
   }
@@ -127,7 +131,11 @@ export function buildPromotionManifest(input) {
       gate_id: gateId,
       source_digest: proof.source_digest,
       source_commit: provenance.source_commit,
-      artifact_path: provenance.artifact_path ?? null,
+      // The binary is identified by its SHA-256 and source commit, so the absolute
+      // path adds no audit value and would bake a machine-local directory (and the
+      // operator's username) into a durable digest-addressed artifact. Persist only
+      // whether a path was recorded.
+      artifact_path_present: typeof provenance.artifact_path === "string" && provenance.artifact_path !== "",
       artifact_sha256: provenance.artifact_sha256 ?? proof.source_digest,
       observed_at: proof.observed_at ?? null,
       expires_at: proof.expires_at ?? null,

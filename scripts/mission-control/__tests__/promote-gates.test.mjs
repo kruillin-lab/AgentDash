@@ -286,3 +286,45 @@ test("a stale expected mode is rejected at commit time, not just at read time", 
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// The manifest never persists machine-local paths
+//
+// "Commit only the configuration shape, never machine-local credentials or
+// evidence." operator_command is redacted for exactly this reason; every other
+// persisted field must hold the same line. The binary is still identified by its
+// SHA-256, so redacting the path loses no audit value.
+// ---------------------------------------------------------------------------
+
+test("gate evidence identifies binaries by digest, never by machine-local path", () => {
+  const input = manifestInput();
+  input.snapshot.proofs = input.snapshot.proofs.map((p) => ({
+    ...p,
+    facts: { provenance: { artifact_path: "C:\Users\someone\AppData\Local\hermes\hermes.exe", artifact_sha256: DIGEST, source_commit: COMMIT } },
+  }));
+
+  const manifest = buildPromotionManifest(input);
+  const serialized = JSON.stringify(manifest);
+  assert.doesNotMatch(serialized, /C:\\Users|\/home\//i);
+  assert.doesNotMatch(serialized, /someone/i);
+  // The binary remains auditable by digest and commit.
+  for (const entry of manifest.gate_evidence) {
+    assert.match(entry.artifact_sha256, /^[a-f0-9]{64}$/i);
+    assert.match(entry.source_commit, /^[a-f0-9]{40}$/i);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// evaluatePromotion is safe on its own, independent of caller discipline
+// ---------------------------------------------------------------------------
+
+test("an unparseable clock does not silently disable the expiry check", () => {
+  const stale = fullSnapshot();
+  stale.expires_at = "2020-01-01T00:00:00.000Z";
+  stale.proofs = stale.proofs.map((p) => ({ ...p, expires_at: "2020-01-01T00:00:00.000Z" }));
+  // `Date.parse(x) <= NaN` is always false, so a NaN clock would silently skip the
+  // expiry reasons entirely and report a stale conjunction as promotable.
+  const result = evaluatePromotion(stale, "enabled", Number.NaN);
+  assert.equal(result.ready, false);
+  assert.match(result.reasons.join(" "), /expired|stale/i);
+});
