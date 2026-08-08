@@ -49,6 +49,14 @@ describe("action classifier", () => {
     expect(classifyAction(evidence(overrides as Partial<ActionClassificationEvidence>)).outcome).toBe(expected);
   });
 
+  // Spec evidence precedence: "A failed or MISSING required check overrides a verifier's prose
+  // 'pass'", and success "requires the authoritative adapter terminal signal and every
+  // action-specific required check". An empty check set is therefore not success evidence — the
+  // classifier itself must not return `succeeded`, independently of the schema's own guard.
+  test("treats a missing required check as verification failure, never success", () => {
+    expect(classifyAction(evidence({ required_checks: [] })).outcome).toBe("verification_failure");
+  });
+
   test("lets authoritative success beat a later cancellation but not an earlier confirmed cancellation", () => {
     expect(classifyAction(evidence({ cancellation_confirmed_at: "2026-08-06T12:00:20.000Z" })).outcome).toBe("succeeded");
     expect(classifyAction(evidence({ cancellation_confirmed_at: "2026-08-06T12:00:05.000Z" })).outcome).toBe("cancelled");

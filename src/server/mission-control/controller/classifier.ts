@@ -52,7 +52,9 @@ function chooseOutcome(evidence: ActionClassificationEvidence): ActionOutcome {
   if (evidence.transient_infrastructure) return "transient_infrastructure";
   if (evidence.transport_ambiguous || terminalAt === null || evidence.adapter_terminal_code === null) return "ambiguous";
   if (evidence.semantic_failure || evidence.adapter_terminal_code !== "success") return "semantic_failure";
-  if (evidence.required_checks.some((check) => !check.passed)) return "verification_failure";
+  // A failed OR MISSING required check overrides a claim of success: an empty check set is not
+  // success evidence, so it classifies as a verification failure rather than falling through.
+  if (evidence.required_checks.length === 0 || evidence.required_checks.some((check) => !check.passed)) return "verification_failure";
   return "succeeded";
 }
 

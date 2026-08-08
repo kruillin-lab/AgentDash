@@ -723,6 +723,11 @@ describe("mission-control contracts", () => {
   test("enforces deterministic success and exact route-fact evidence", () => {
     expect(contracts.ActionOutcomeV1Schema.safeParse(actionOutcome).success).toBe(true);
     expect(contracts.ActionOutcomeV1Schema.safeParse({ ...actionOutcome, required_checks: [{ ...actionOutcome.required_checks[0], passed: false }] }).success).toBe(false);
+    // `succeeded` requires EVERY action-specific required check, and a MISSING required check
+    // overrides a claim of success. An empty check set is therefore not success evidence.
+    expect(contracts.ActionOutcomeV1Schema.safeParse({ ...actionOutcome, required_checks: [] }).success).toBe(false);
+    // A non-success outcome carries no such obligation.
+    expect(contracts.ActionOutcomeV1Schema.safeParse({ ...actionOutcome, outcome: "semantic_failure", adapter_terminal_code: null, adapter_sequence: null, required_checks: [] }).success).toBe(true);
     expect(contracts.ActionOutcomeV1Schema.safeParse({ ...actionOutcome, route_facts: { route_id: "route-1", route_proof_id: "route-proof-1", route_proof_digest: null } }).success).toBe(false);
   });
 
