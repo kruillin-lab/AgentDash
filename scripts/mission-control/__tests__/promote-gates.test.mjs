@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -381,8 +381,120 @@ test("promotion accepts a receipt whose evidence really exists", async () => {
   try {
     const dir = join(stateDir, "route-evidence");
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, `${DIGEST}.json`), JSON.stringify({ evidence_digest: DIGEST }), "utf8");
-    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }]);
+    await writeFile(join(dir, `${DIGEST}.json`), JSON.stringify({
+      schema_version: "agentdash.qualification-evidence/v1", status: "active",
+      route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding", level: 5,
+      evaluated_at: "2026-08-01T00:00:00.000Z", expires_at: "2099-01-01T00:00:00.000Z",
+    }), "utf8");
+    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z"));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A qualification receipt must name evidence the RUNTIME would also honour.
+//
+// RouteRegistry (routes/registry.ts) rejects symlinks, non-digest-addressed
+// filenames, schema-invalid content, evidence whose digest does not match its own
+// content, expired evidence, and evidence superseded by a revocation. A file that
+// merely exists is not "real evidence": promotion must not enter `enabled` on the
+// strength of evidence live dispatch would refuse.
+// ---------------------------------------------------------------------------
+
+function evidenceFile(overrides = {}) {
+  return {
+    schema_version: "agentdash.qualification-evidence/v1",
+    status: "active",
+    route_id: "codex/gpt-5.6-terra",
+    task_class: "bounded_coding",
+    level: 5,
+     evaluated_at: "2026-08-01T00:00:00.000Z",
+    expires_at: "2099-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+async function seedEvidence(stateDir, digest, body) {
+  const dir = join(stateDir, "route-evidence");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${digest}.json`), JSON.stringify(body), "utf8");
+}
+
+test("expired qualification evidence cannot authorize promotion", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile({ expires_at: "2020-01-01T00:00:00.000Z" }));
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /expired/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a revoked route cannot authorize promotion", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile());
+    const revDir = join(stateDir, "route-revocations");
+    await mkdir(revDir, { recursive: true });
+    // Revoked AFTER the evidence was evaluated, so the evidence is superseded.
+    await writeFile(join(revDir, `${"e".repeat(64)}.json`), JSON.stringify({
+      route_id: "codex/gpt-5.6-terra", task_class: "bounded_coding", revoked_at: "2026-08-05T00:00:00.000Z",
+    }), "utf8");
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /revoked/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("schema-invalid evidence cannot authorize promotion", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, { not: "qualification evidence" });
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /evidence/i,
+    );
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("current, unrevoked, schema-valid evidence authorizes promotion", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
+  try {
+    await seedEvidence(stateDir, DIGEST, evidenceFile());
+    await verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z"));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked evidence file cannot authorize promotion", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
+  try {
+    const dir = join(stateDir, "route-evidence");
+    await mkdir(dir, { recursive: true });
+    const target = join(stateDir, "forged.json");
+    await writeFile(target, JSON.stringify(evidenceFile()), "utf8");
+    try {
+      await symlink(target, join(dir, `${DIGEST}.json`), "file");
+    } catch {
+      // Creating a symlink needs privileges on some platforms; skip rather than
+      // pass vacuously, so this never becomes an assertion that cannot fail.
+      t.skip("this platform does not permit creating a symlink");
+      return;
+    }
+    await assert.rejects(
+      verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
+      /immutable regular file/i,
+    );
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }

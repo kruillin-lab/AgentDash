@@ -114,6 +114,10 @@ Promotion is a real **compare-and-set** over a durable record under
   real evidence the qualification runner wrote to
   `AGENTDASH_STATE_DIR/route-evidence/<digest>.json`; a well-formed but
   fabricated receipt is refused, because promotion cannot manufacture evidence.
+  The evidence must also be one the runtime would still honour: an immutable
+  regular file (never a symlink), schema-valid, inside its validity window, and
+  not superseded by a `route-revocations/` record. Evidence that live dispatch
+  would refuse cannot be used to enter `enabled`.
   Only the digest and route tuple are persisted — any other field an operator
   puts in the receipt file is dropped rather than baked into the manifest.
 - Each promotion writes an immutable `PromotionManifestV1` beside the record as

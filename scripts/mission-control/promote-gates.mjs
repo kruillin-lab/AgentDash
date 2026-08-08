@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import path, { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -276,25 +276,79 @@ async function writeDispatchRecords(dir, manifest) {
 
 /**
  * A receipt authorizes model-backed dispatch only if the qualification runner really
- * produced it: the runner writes its evidence as route-evidence/<evidence_digest>.json,
- * so an absent file means the receipt was manufactured. Promotion cannot invent evidence.
+ * produced it AND the runtime would still honour it. RouteRegistry (routes/registry.ts)
+ * is the authority for that: it rejects symlinks, non-digest-addressed names,
+ * schema-invalid content, expired evidence, and evidence superseded by a revocation.
+ * A file that merely exists is not evidence, so those same rules are applied here —
+ * otherwise `enabled` could be entered on evidence live dispatch would refuse.
  */
-export async function verifyQualificationReceipts(stateDir, receipts) {
-  for (const receipt of receipts ?? []) {
+export async function verifyQualificationReceipts(stateDir, receipts, now = Date.now()) {
+  const list = receipts ?? [];
+  if (list.length === 0) return;
+
+  const revocations = await readRevocations(stateDir);
+  for (const receipt of list) {
     if (!SHA256.test(receipt?.digest ?? "")) throw new Error("Every qualification receipt must carry a canonical digest.");
+    const file = join(stateDir, "route-evidence", `${receipt.digest}.json`);
+
+    // The evidence must be an immutable regular file, never a symlink to elsewhere.
+    let stats;
     try {
-      await readFile(join(stateDir, "route-evidence", `${receipt.digest}.json`), "utf8");
+      stats = await lstat(file);
     } catch {
       throw new Error("A qualification receipt has no matching qualification evidence; promotion cannot manufacture evidence.");
     }
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new Error("Qualification evidence must be an immutable regular file.");
+    }
+
+    let evidence;
+    try {
+      evidence = JSON.parse(await readFile(file, "utf8"));
+    } catch {
+      throw new Error("Qualification evidence could not be read.");
+    }
+    if (typeof evidence !== "object" || evidence === null || Array.isArray(evidence)
+      || typeof evidence.route_id !== "string" || typeof evidence.task_class !== "string"
+      || typeof evidence.evaluated_at !== "string" || typeof evidence.expires_at !== "string") {
+      throw new Error("Qualification evidence failed strict validation.");
+    }
+
+    // Same window the runtime enforces: evaluated in the past, not yet expired.
+    const evaluatedAt = Date.parse(evidence.evaluated_at);
+    const expiresAt = Date.parse(evidence.expires_at);
+    if (!Number.isFinite(evaluatedAt) || !Number.isFinite(expiresAt)) throw new Error("Qualification evidence carries an invalid validity window.");
+    if (evaluatedAt > now) throw new Error("Qualification evidence is not yet valid.");
+    if (expiresAt < now) throw new Error("Qualification evidence has expired; re-qualify the route before promoting.");
+
+    // A revocation recorded after the evidence was evaluated supersedes it.
+    const superseding = revocations.find((revocation) => revocation.route_id === evidence.route_id
+      && revocation.task_class === evidence.task_class
+      && Date.parse(revocation.revoked_at) <= now
+      && Date.parse(revocation.revoked_at) >= evaluatedAt);
+    if (superseding) throw new Error("The qualification route was revoked after this evidence was produced; re-qualify before promoting.");
   }
 }
 
-export async function readLatestSnapshot(evidenceDir) {
-  // Evidence is digest-addressed; the operator selects the exact snapshot file.
-  // This helper reads one explicit path rather than guessing a "latest".
-  const content = await readFile(evidenceDir, "utf8");
-  return JSON.parse(content);
+async function readRevocations(stateDir) {
+  const dir = join(stateDir, "route-revocations");
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const revocations = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}.json$/.test(entry.name)) continue;
+    try {
+      const parsed = JSON.parse(await readFile(join(dir, entry.name), "utf8"));
+      if (parsed && typeof parsed.route_id === "string" && typeof parsed.revoked_at === "string") revocations.push(parsed);
+    } catch {
+      throw new Error("Route revocations could not be read; promotion cannot prove the route is still qualified.");
+    }
+  }
+  return revocations;
 }
 
 async function main(argv) {
