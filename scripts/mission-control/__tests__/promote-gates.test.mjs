@@ -457,10 +457,13 @@ test("a revoked route cannot authorize promotion", async () => {
 test("schema-invalid evidence cannot authorize promotion", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "promote-evidence-"));
   try {
-    await seedEvidence(stateDir, DIGEST, { not: "qualification evidence" });
+    // Valid dates but a wrong-typed route_id, so ONLY the schema-shape check can reject
+    // this. A fixture missing its dates would trip the validity-window check instead and
+    // pass for the wrong reason, leaving the shape guard unproven.
+    await seedEvidence(stateDir, DIGEST, evidenceFile({ route_id: 12345 }));
     await assert.rejects(
       verifyQualificationReceipts(stateDir, [{ digest: DIGEST }], Date.parse("2026-08-06T12:00:00.000Z")),
-      /evidence/i,
+      /failed strict validation/i,
     );
   } finally {
     await rm(stateDir, { recursive: true, force: true });
