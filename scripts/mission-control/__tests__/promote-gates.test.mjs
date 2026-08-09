@@ -695,3 +695,18 @@ test("a bare positional path in the operator command is redacted", () => {
   assert.match(manifest.operator_command, /--mode=enabled/);
   assert.match(manifest.operator_command, /--promote/);
 });
+
+// The manifest must record the explicit local operator action that produced it, so
+// a missing or empty operator_command is refused rather than bound as blank.
+test("a missing operator command is refused", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({ operator_command: undefined })), /operator command/i);
+});
+
+test("an empty operator command is refused", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({ operator_command: "" })), /operator command/i);
+  assert.throws(() => buildPromotionManifest(manifestInput({ operator_command: "   " })), /operator command/i);
+});
+
+test("a non-string operator command is refused", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({ operator_command: 42 })), /operator command/i);
+});
