@@ -642,3 +642,56 @@ test("auto cannot be enabled for a mode below enabled", () => {
     },
   })), /auto/i);
 });
+
+// ---------------------------------------------------------------------------
+// Each expiry guard must be independently load-bearing.
+//
+// The snapshot-level and per-proof expiry checks are separate guards. A fixture
+// where BOTH are stale lets either one catch it, so deleting the other goes
+// unnoticed. These fixtures make exactly one stale at a time.
+// ---------------------------------------------------------------------------
+
+const AT = Date.parse("2026-08-06T12:00:00.000Z");
+
+test("a stale snapshot expiry is caught even when every proof is current", () => {
+  const snapshot = fullSnapshot();
+  snapshot.expires_at = "2020-01-01T00:00:00.000Z";
+  snapshot.proofs = snapshot.proofs.map((proof) => ({ ...proof, expires_at: "2099-01-01T00:00:00.000Z" }));
+  const result = evaluatePromotion(snapshot, "enabled", AT);
+  assert.equal(result.ready, false);
+  assert.match(result.reasons.join(" "), /gate snapshot has expired/i);
+});
+
+test("a single stale proof is caught even when the snapshot is current", () => {
+  const snapshot = fullSnapshot();
+  snapshot.expires_at = "2099-01-01T00:00:00.000Z";
+  snapshot.proofs = snapshot.proofs.map((proof) => ({ ...proof, expires_at: "2099-01-01T00:00:00.000Z" }));
+  // Exactly one gate is stale; the snapshot itself is not.
+  snapshot.proofs[3] = { ...snapshot.proofs[3], expires_at: "2020-01-01T00:00:00.000Z" };
+  const result = evaluatePromotion(snapshot, "enabled", AT);
+  assert.equal(result.ready, false);
+  assert.match(result.reasons.join(" "), /Expired evidence for pm_isolation/i);
+});
+
+// buildPromotionManifest validates receipt digests itself, which is the ONLY such
+// guard for target modes below `enabled` (main() runs verifyQualificationReceipts
+// for `enabled` only). Exercise it directly at a lower target mode.
+test("a malformed receipt digest is rejected even below enabled", () => {
+  assert.throws(() => buildPromotionManifest(manifestInput({
+    target_mode: "candidate",
+    qualification_receipts: [{ digest: "NOT-A-REAL-DIGEST", route_id: "codex/x", task_class: "bounded_coding" }],
+  })), /canonical digest/i);
+});
+
+// A bare positional path (no --flag= prefix) takes the other branch of the
+// redaction map and was previously unexercised.
+test("a bare positional path in the operator command is redacted", () => {
+  const manifest = buildPromotionManifest(manifestInput({
+    operator_command: String.raw`promote-gates --mode=enabled --promote C:UsersLEAKMARKERsnap.json`,
+  }));
+  assert.doesNotMatch(manifest.operator_command, /LEAKMARKER/);
+  assert.match(manifest.operator_command, /[redacted]/);
+  // Flags themselves stay auditable.
+  assert.match(manifest.operator_command, /--mode=enabled/);
+  assert.match(manifest.operator_command, /--promote/);
+});
