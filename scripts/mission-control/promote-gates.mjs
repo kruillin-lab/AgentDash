@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { canonicalJson, isMainModule, redactDiagnostic, sha256 } from "./probe-utils.mjs";
 import { GATE_IDS } from "./write-gate-manifest.mjs";
+import { GATE_MANIFEST_SCHEMA_VERSION, loadSigningKey, verifyGateManifest } from "./sign-gate-manifest.mjs";
 
 // ---------------------------------------------------------------------------
 // promote-gates: deliberately promote Mission Control dispatch
@@ -22,6 +23,28 @@ const SHA256 = /^[a-f0-9]{64}$/i;
 const COMMIT = /^[a-f0-9]{40}$/i;
 const MODES = ["disabled", "qualification", "candidate", "enabled"];
 
+// ---------------------------------------------------------------------------
+// Authentication of the evidence, kept separate from validation of it.
+//
+// evaluatePromotion validates gate EVIDENCE. Whether that evidence is authentic is
+// a different question, so it lives here: one seam, checked once at the operator
+// boundary. Folding it into evaluatePromotion would force every caller that merely
+// validates evidence to also authenticate it, duplicating the rule in two layers —
+// the same shape as the reader divergence that already caused one real bug.
+// ---------------------------------------------------------------------------
+
+export function authenticateGateEvidence(snapshot, signingKey, now = Date.now()) {
+  const isSignedManifest = typeof snapshot === "object" && snapshot !== null && !Array.isArray(snapshot)
+    && snapshot.schema_version === GATE_MANIFEST_SCHEMA_VERSION;
+  if (!isSignedManifest) {
+    return { ok: false, reason: "Promotion requires a signed GateManifestV1; unsigned probe evidence cannot authorize dispatch." };
+  }
+  if (!signingKey) {
+    return { ok: false, reason: "No signing key is available to verify the gate manifest." };
+  }
+  return verifyGateManifest(snapshot, signingKey, Number.isFinite(now) ? now : Date.now());
+}
+
 export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
   const reasons = [];
   // `Date.parse(x) <= NaN` is always false, so an unparseable clock would silently
@@ -33,7 +56,17 @@ export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
     return { ready: false, reasons: ["Missing gate snapshot; promotion cannot be evaluated."], manifest_digest: null };
   }
 
-  const proofs = Array.isArray(snapshot.proofs) ? snapshot.proofs : [];
+  // A signed manifest carries gate_evidence; normalize it to the proof shape the
+  // checks below already understand so both forms are validated identically.
+  const proofs = Array.isArray(snapshot.gate_evidence)
+    ? snapshot.gate_evidence.map((entry) => ({
+        gate_id: entry?.gate_id,
+        status: "pass",
+        source_digest: entry?.source_digest,
+        expires_at: entry?.expires_at,
+        facts: { provenance: { source_commit: entry?.source_commit, artifact_sha256: entry?.artifact_sha256 } },
+      }))
+    : Array.isArray(snapshot.proofs) ? snapshot.proofs : [];
   const provenGateIds = new Set(proofs.filter((proof) => proof && proof.status === "pass").map((proof) => proof.gate_id));
   for (const gateId of GATE_IDS) {
     if (!provenGateIds.has(gateId)) reasons.push(`Missing gate proof for ${gateId}.`);
@@ -134,7 +167,9 @@ export function buildPromotionManifest(input) {
   }));
 
   // Bind each gate to its exact evidence digest, external commit, and binary.
-  const gateEvidence = GATE_IDS.map((gateId) => {
+  // A signed GateManifestV1 already carries exactly this bound, path-free shape, so
+  // reuse it rather than rebuilding it from a proof list it does not have.
+  const gateEvidence = Array.isArray(snapshot.gate_evidence) ? snapshot.gate_evidence : GATE_IDS.map((gateId) => {
     const proof = snapshot.proofs.find((candidate) => candidate?.gate_id === gateId);
     const provenance = proof?.facts?.provenance ?? {};
     return {
@@ -405,14 +440,6 @@ async function main(argv) {
     return;
   }
 
-  const evaluation = evaluatePromotion(snapshot, targetMode);
-  if (!evaluation.ready) {
-    console.error("Mission Control promotion: NO-GO");
-    for (const reason of evaluation.reasons) console.error(`- ${reason}`);
-    process.exitCode = 1;
-    return;
-  }
-
   // The durable dispatch mode lives beside the other machine-local state, never
   // in committed configuration.
   const stateDir = process.env.AGENTDASH_STATE_DIR;
@@ -422,6 +449,34 @@ async function main(argv) {
     process.exitCode = 1;
     return;
   }
+
+  // Authenticate the evidence before validating it: only a reviewed, signed
+  // GateManifestV1 may authorize dispatch.
+  let signingKey = null;
+  try {
+    signingKey = await loadSigningKey(stateDir);
+  } catch (error) {
+    console.error("Mission Control promotion: NO-GO");
+    console.error("- " + redactDiagnostic(error && error.message));
+    process.exitCode = 1;
+    return;
+  }
+  const authenticated = authenticateGateEvidence(snapshot, signingKey, Date.now());
+  if (!authenticated.ok) {
+    console.error("Mission Control promotion: NO-GO");
+    console.error("- " + authenticated.reason);
+    process.exitCode = 1;
+    return;
+  }
+
+  const evaluation = evaluatePromotion(snapshot, targetMode);
+  if (!evaluation.ready) {
+    console.error("Mission Control promotion: NO-GO");
+    for (const reason of evaluation.reasons) console.error(`- ${reason}`);
+    process.exitCode = 1;
+    return;
+  }
+
 
   // Compare-and-set: the operator states the mode they believe is active, and the
   // transition applies only if the durable store still holds it.

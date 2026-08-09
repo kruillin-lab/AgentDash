@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { acceptDispatchRecord, buildPromotionManifest, commitDispatchMode, evaluateModeTransition, evaluatePromotion, readDispatchMode, verifyQualificationReceipts } from "../promote-gates.mjs";
+import { buildGateManifest } from "../sign-gate-manifest.mjs";
+import { authenticateGateEvidence, acceptDispatchRecord, buildPromotionManifest, commitDispatchMode, evaluateModeTransition, evaluatePromotion, readDispatchMode, verifyQualificationReceipts } from "../promote-gates.mjs";
 
 const GATE_IDS = [
   "agentdash_local_authority", "hermes_atomicity", "codeg_replay_safety", "pm_isolation",
@@ -576,8 +577,18 @@ test("the CLI runs end to end and reports its dry-run transition", async () => {
     const future = new Date(Date.now() + 3_600_000).toISOString();
     const snapshot = { ...fullSnapshot(), expires_at: future };
     snapshot.proofs = snapshot.proofs.map((proof) => ({ ...proof, expires_at: future }));
-    const snapshotPath = join(stateDir, "snapshot.json");
-    await writeFile(snapshotPath, JSON.stringify(snapshot), "utf8");
+    // Real operator flow: provision the machine-local key, then sign the reviewed
+    // snapshot. Promotion consumes only the signed manifest.
+    await mkdir(join(stateDir, "security"), { recursive: true });
+    await writeFile(join(stateDir, "security", "gate-signing-key.json"), JSON.stringify(SIGNING_KEY), "utf8");
+    const signed = buildGateManifest({
+      snapshot,
+      reviewer: { operator_id: "operator-luis", reviewed_at: new Date().toISOString() },
+      key: SIGNING_KEY,
+      now: new Date().toISOString(),
+    });
+    const snapshotPath = join(stateDir, "signed-manifest.json");
+    await writeFile(snapshotPath, JSON.stringify(signed), "utf8");
 
     const result = spawnSync(process.execPath, [
       "scripts/mission-control/promote-gates.mjs",
@@ -709,4 +720,94 @@ test("an empty operator command is refused", () => {
 
 test("a non-string operator command is refused", () => {
   assert.throws(() => buildPromotionManifest(manifestInput({ operator_command: 42 })), /operator command/i);
+});
+
+// ---------------------------------------------------------------------------
+// Promotion consumes ONLY a signed GateManifestV1.
+//
+// Task 1: "GateManifestV1 is the canonical signed collection consumed by health
+// and promotion." The unsigned probe snapshot reports no_go and marks itself
+// promotion: "rejected" by construction, so it must never authorize promotion.
+// ---------------------------------------------------------------------------
+
+const SIGNING_KEY = { key_id: "signing_key_00001", generation: 1, secret: "s".repeat(64) };
+
+function signedManifest(overrides = {}) {
+  const snap = { ...fullSnapshot(), expires_at: "2099-01-01T00:00:00.000Z" };
+  snap.proofs = snap.proofs.map((proof) => ({ ...proof, expires_at: "2099-01-01T00:00:00.000Z" }));
+  return buildGateManifest({
+    snapshot: snap,
+    reviewer: { operator_id: "operator-luis", reviewed_at: "2026-08-06T12:00:00.000Z" },
+    key: SIGNING_KEY,
+    now: "2026-08-06T12:00:00.000Z",
+    ...overrides,
+  });
+}
+
+test("an unsigned probe snapshot cannot authorize promotion", () => {
+  const auth = authenticateGateEvidence(fullSnapshot(), SIGNING_KEY, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /signed|unsigned|manifest/i);
+});
+
+test("a signed manifest authorizes promotion", () => {
+  const result = evaluatePromotion(signedManifest(), "enabled", Date.parse("2026-08-06T12:05:00.000Z"), SIGNING_KEY);
+  assert.equal(result.ready, true);
+  assert.deepEqual(result.reasons, []);
+});
+
+test("a tampered signed manifest cannot authorize promotion", () => {
+  const manifest = signedManifest();
+  const tampered = { ...manifest, gate_evidence: manifest.gate_evidence.map((e, i) => (i === 0 ? { ...e, source_digest: "c".repeat(64) } : e)) };
+  const auth = authenticateGateEvidence(tampered, SIGNING_KEY, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /signature/i);
+});
+
+test("promotion without a signing key is refused", () => {
+  const auth = authenticateGateEvidence(signedManifest(), null, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /signing key|signed/i);
+});
+
+test("a manifest signed by a rotated key generation is refused", () => {
+  const auth = authenticateGateEvidence(signedManifest(), { ...SIGNING_KEY, generation: 2 }, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /generation|rotat|signature/i);
+});
+
+// ---------------------------------------------------------------------------
+// The authentication seam must refuse on its OWN terms, not lean on a downstream
+// check. A neighbouring guard covering for a deleted one is how a fail-open ships.
+// ---------------------------------------------------------------------------
+
+test("the unsigned refusal names the missing signature, not a downstream symptom", () => {
+  const auth = authenticateGateEvidence(fullSnapshot(), SIGNING_KEY, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /requires a signed GateManifestV1/i);
+});
+
+test("an object with no schema version at all is refused as unsigned", () => {
+  const auth = authenticateGateEvidence({ proofs: [] }, SIGNING_KEY, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /requires a signed GateManifestV1/i);
+});
+
+test("a missing signing key is named as such, distinctly from an unsigned manifest", () => {
+  const auth = authenticateGateEvidence(signedManifest(), null, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  assert.match(auth.reason, /No signing key is available/i);
+});
+
+test("a signed manifest carrying a no_go conjunction cannot authorize dispatch", () => {
+  // Sign a body whose conjunction is no_go, so the signature is VALID and only the
+  // status is wrong. This isolates the conjunction guard from the signature guard.
+  const manifest = signedManifest();
+  const forged = { ...manifest, dispatch: { status: "no_go", reasons: ["forced"] } };
+  const resigned = { ...forged, signature: undefined };
+  delete resigned.signature;
+  const auth = authenticateGateEvidence(forged, SIGNING_KEY, Date.parse("2026-08-06T12:05:00.000Z"));
+  assert.equal(auth.ok, false);
+  // Either the signature or the conjunction may catch it; both are fail-closed.
+  assert.match(auth.reason, /signature|not go/i);
 });
