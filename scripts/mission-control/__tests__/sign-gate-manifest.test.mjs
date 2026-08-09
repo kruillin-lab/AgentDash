@@ -320,6 +320,37 @@ test("a symlinked signing key is refused", async (t) => {
   }
 });
 
+test("a symlinked key never yields the attacker's secret, not merely an error", async (t) => {
+  // The existing test above pins the REFUSAL. This one pins the CONSEQUENCE: whatever
+  // the refusal path does, the secret behind the link must never be returned. That
+  // remains true regardless of which guard fires, so it cannot silently start
+  // leaning on a neighbouring check.
+  const stateDir = await mkdtemp(join(tmpdir(), "sign-key-toctou-"));
+  try {
+    const keyPath = join(stateDir, "security", "gate-signing-key.json");
+    await mkdir(join(stateDir, "security"), { recursive: true });
+
+    const attacker = { ...KEY, secret: "z".repeat(48) };
+    const attackerPath = join(stateDir, "attacker-key.json");
+    await writeFile(attackerPath, JSON.stringify(attacker), "utf8");
+    try {
+      await symlink(attackerPath, keyPath, "file");
+    } catch {
+      t.skip("this platform does not permit creating a symlink");
+      return;
+    }
+    // Git Bash `ln -s` COPIES on Windows, which would make this pass for the wrong
+    // reason, so confirm a real link exists before asserting anything.
+    assert.equal((await lstat(keyPath)).isSymbolicLink(), true, "the fixture must be a real symlink");
+
+    const loadedSecret = await loadSigningKey(stateDir).then((key) => key.secret, () => null);
+    assert.notEqual(loadedSecret, attacker.secret, "the attacker's key must never be loaded");
+    assert.equal(loadedSecret, null, "a symlinked key must refuse, not load");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("a directory where the signing key belongs is refused", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "sign-key-dir-"));
   try {

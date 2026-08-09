@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -169,6 +169,7 @@ test("an absent store reads as disabled, the fail-closed default", () => {
 // ---------------------------------------------------------------------------
 
 const FUTURE = "2099-01-01T00:00:00.000Z";
+const NOW = Date.parse("2026-08-06T12:06:00.000Z");
 
 test("a well-formed promotion record is accepted", () => {
   assert.equal(acceptDispatchRecord({ mode: "candidate", manifest_digest: DIGEST, expires_at: FUTURE }), "candidate");
@@ -269,6 +270,87 @@ test("two concurrent promotions from the same mode: exactly one commits", async 
     // The durable record matches the winner, and the loser changed nothing.
     const stored = await readDispatchMode(stateDir, Date.parse("2026-08-06T12:06:00.000Z"));
     assert.ok(["enabled", "qualification"].includes(stored));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A dispatch record is only authority if the manifest it names backs it
+//
+// An independent audit found `manifest_digest` was validated for SHAPE ONLY:
+// /^[a-f0-9]{64}$/ proves someone typed 64 hex characters, nothing more. A
+// hand-written mode.json could assert `enabled` with a digest bound to no
+// manifest, and both readers accepted it — so the durable record vouched for its
+// own authority. These pin the resolution. Each one FAILS if the manifest binding
+// is removed from readDispatchMode.
+// ---------------------------------------------------------------------------
+
+test("a record naming a manifest that does not exist grants nothing", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-authority-"));
+  try {
+    await mkdir(join(stateDir, "dispatch"), { recursive: true });
+    // Shape-valid in every respect, and bound to nothing.
+    await writeFile(join(stateDir, "dispatch", "mode.json"), JSON.stringify({
+      schema_version: "agentdash.dispatch-mode/v1", mode: "enabled", manifest_digest: "a".repeat(64), expires_at: FUTURE,
+    }), "utf8");
+    assert.equal(acceptDispatchRecord(JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8")), NOW), "enabled",
+      "the shape check alone still accepts it — which is exactly why the manifest must be resolved");
+    assert.equal(await readDispatchMode(stateDir, NOW), null, "an unbacked digest must grant nothing");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a tampered manifest cannot match the digest that names it", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-authority-"));
+  try {
+    await commitDispatchMode(stateDir, buildPromotionManifest(manifestInput({ target_mode: "candidate" })), "disabled", NOW);
+    assert.equal(await readDispatchMode(stateDir, NOW), "candidate", "the genuine promotion must still read");
+
+    // Edit the manifest in place, keeping its filename and claimed digest.
+    const record = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
+    const manifestPath = join(stateDir, "dispatch", `promotion-${record.manifest_digest}.json`);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.target_mode = "enabled";
+    await writeFile(manifestPath, JSON.stringify(manifest), "utf8");
+
+    assert.equal(await readDispatchMode(stateDir, NOW), null, "a manifest whose content no longer hashes to its name is not authority");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a genuine manifest cannot authorize a mode it did not promote", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-authority-"));
+  try {
+    // A real, internally consistent `candidate` promotion...
+    await commitDispatchMode(stateDir, buildPromotionManifest(manifestInput({ target_mode: "candidate" })), "disabled", NOW);
+    // ...whose record is then edited to claim `enabled`. The manifest still
+    // verifies against its own digest, so only the target_mode binding catches it.
+    const modePath = join(stateDir, "dispatch", "mode.json");
+    const record = JSON.parse(await readFile(modePath, "utf8"));
+    record.mode = "enabled";
+    await writeFile(modePath, JSON.stringify(record), "utf8");
+
+    assert.equal(await readDispatchMode(stateDir, NOW), null, "the manifest must authorize the exact mode the record grants");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("the manifest is durable before the record that names it", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-authority-"));
+  try {
+    await commitDispatchMode(stateDir, buildPromotionManifest(manifestInput({ target_mode: "candidate" })), "disabled", NOW);
+    // Both readers refuse a record whose manifest is absent, so publishing the
+    // record first would make a crash between the two renames a permanently void
+    // promotion. Prove the manifest is already durable once the record exists.
+    const record = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
+    const manifestStats = await stat(join(stateDir, "dispatch", `promotion-${record.manifest_digest}.json`));
+    const recordStats = await stat(join(stateDir, "dispatch", "mode.json"));
+    assert.ok(manifestStats.isFile(), "the named manifest must exist alongside the record");
+    assert.ok(manifestStats.mtimeMs <= recordStats.mtimeMs, "the manifest must land before the record that names it");
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }

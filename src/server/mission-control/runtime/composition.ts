@@ -3,6 +3,7 @@ import "server-only";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
+import { canonicalDigest } from "../../../lib/mission-control/contracts/common";
 import { ActionCommandRunner, CommandProposalJournal, type ActionCommandCodeG, type ActionCommandHermes } from "./action-command";
 import { MissionControlController } from "./controller";
 import { DispatchModeSchema, resolveDispatchMode, type DispatchMode } from "./dispatch-mode";
@@ -30,6 +31,45 @@ function stateDirFromEnv(): string | null {
 }
 
 /**
+ * Resolve the manifest the record NAMES and prove the record is the one that
+ * manifest authorizes. Shape alone is not authority: a `manifest_digest` matching
+ * /^[a-f0-9]{64}$/ only proves someone typed 64 hex characters, so a hand-written
+ * record could otherwise assert any mode with a digest bound to nothing.
+ *
+ * The digest is recomputed over the manifest's own canonical body (every field
+ * except `manifest_digest`, exactly as buildPromotionManifest computed it), so a
+ * tampered manifest cannot match its own name. `target_mode` must equal the
+ * record's mode as well, or a genuine `candidate` manifest would authorize
+ * `enabled`.
+ *
+ * This MUST accept exactly what promote-gates.mjs::verifyDispatchRecordManifest
+ * accepts: if the two disagree, `--expect-current` compares against a mode that is
+ * not the one actually in force.
+ */
+async function verifyRecordManifest(stateDir: string, record: { mode?: unknown; manifest_digest?: unknown }): Promise<boolean> {
+  const digest = record.manifest_digest;
+  if (typeof digest !== "string" || !/^[a-f0-9]{64}$/i.test(digest)) return false;
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await readFile(join(stateDir, "dispatch", `promotion-${digest}.json`), "utf8"));
+  } catch {
+    // A named manifest that is missing or unreadable is not authority.
+    return false;
+  }
+  if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) return false;
+  const { manifest_digest: claimed, ...body } = manifest as Record<string, unknown>;
+  if (claimed !== digest) return false;
+  // canonicalDigest is sha256(canonicalJson(x)), byte-identical to the digest
+  // promote-gates.mjs computes over the same body. The TS canonicalJson THROWS on
+  // array holes / exotic prototypes where the script version serializes them; for a
+  // JSON.parse'd manifest neither is reachable, and a throw here is caught below and
+  // fails closed, which is the correct direction.
+  if (canonicalDigest(body) !== digest) return false;
+  // The manifest must authorize the exact mode the record grants.
+  return (manifest as { target_mode?: unknown }).target_mode === record.mode;
+}
+
+/**
  * Read the durable mode written by `promote-gates --promote`. This is the record
  * produced by a compare-and-set against a proven gate conjunction and bound to a
  * PromotionManifestV1. Anything missing, unreadable, or malformed returns null,
@@ -48,7 +88,9 @@ async function readPromotedDispatchMode(stateDir: string): Promise<DispatchMode 
     // Authority requires the bound manifest digest; a bare mode is not a promotion.
     if (typeof record.manifest_digest !== "string" || !/^[a-f0-9]{64}$/i.test(record.manifest_digest)) return null;
     const parsed = DispatchModeSchema.safeParse(record.mode);
-    return parsed.success ? parsed.data : null;
+    if (!parsed.success) return null;
+    // Shape is not authority: the named manifest must exist and back this record.
+    return (await verifyRecordManifest(stateDir, record)) ? parsed.data : null;
   } catch {
     return null;
   }

@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, rename } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 import { canonicalJson, sha256 } from "./probe-utils.mjs";
@@ -206,9 +207,15 @@ export function verifyGateManifest(manifest, key, now = Date.now(), stateDir = n
 export async function loadSigningKey(stateDir) {
   const file = join(stateDir, "security", "gate-signing-key.json");
 
-  // The key is the most sensitive artifact here, so it gets at least the handle
-  // discipline the evidence path already applies: it must be a real regular file,
-  // never a symlink redirecting the read somewhere an attacker controls.
+  // The key is the most sensitive artifact here, so it gets the same handle
+  // discipline the evidence path applies (write-gate-manifest.mjs's
+  // validateOpenEvidenceFile): it must be a real regular file, never a symlink
+  // redirecting the read somewhere an attacker controls.
+  //
+  // lstat is the symlink refusal. It cannot be replaced by O_NOFOLLOW here:
+  // `fs.constants.O_NOFOLLOW` is UNDEFINED on Windows, so an `?? 0` fallback makes
+  // the flag a silent no-op and the open follows the link. Verified directly on this
+  // platform — removing this check let a symlinked key load.
   let stats;
   try {
     stats = await lstat(file);
@@ -219,11 +226,30 @@ export async function loadSigningKey(stateDir) {
     throw new Error("The signing key must be an immutable regular file, never a symlink.");
   }
 
+  // Then read the bytes through ONE open handle. The previous form validated the
+  // path with lstat and then read it again with readFile — validating one file and
+  // reading another, so a name swapped between the two calls passed the check while
+  // the read followed the attacker's target. Opening once and reading from that
+  // handle removes the second path resolution, so there is no window to race.
+  //
+  // Deliberately NOT added here: a dev/ino comparison against the lstat above, or a
+  // second isFile() check on the handle. Both were written, and mutation testing
+  // showed the suite could not fail on either — lstat already refuses every case
+  // they would catch, so each was a guard leaning on its neighbour. An assertion
+  // that cannot fail is worse than an honestly absent one.
   let raw;
+  let handle;
   try {
-    raw = JSON.parse(await readFile(file, "utf8"));
+    handle = await open(file, fsConstants.O_RDONLY);
   } catch {
     throw new Error("No signing key is configured; unsigned evidence cannot authorize dispatch.");
+  }
+  try {
+    raw = JSON.parse(await handle.readFile({ encoding: "utf8" }));
+  } catch {
+    throw new Error("No signing key is configured; unsigned evidence cannot authorize dispatch.");
+  } finally {
+    await handle.close();
   }
   // Own-property reads only. JSON.parse already makes a literal "__proto__" key an own
   // data property that does not affect prototype lookup, so this is defence in depth

@@ -256,14 +256,50 @@ export function acceptDispatchRecord(raw, now = Date.now()) {
 }
 
 /**
+ * Resolve the manifest the record NAMES and prove the record is the one that
+ * manifest authorizes. Shape alone is not authority: `manifest_digest` matching
+ * /^[a-f0-9]{64}$/ only proves someone typed 64 hex characters, so a hand-written
+ * record could otherwise assert any mode with a digest bound to nothing.
+ *
+ * The digest is recomputed over the manifest's own canonical body (every field
+ * except `manifest_digest`, exactly as buildPromotionManifest computed it), so a
+ * tampered manifest cannot match its own name. `target_mode` must equal the
+ * record's mode as well, or a genuine `candidate` manifest would authorize
+ * `enabled`.
+ *
+ * Anything absent, unreadable, malformed, or mismatched returns false — the
+ * record then reads as `disabled`, never as the mode it claimed.
+ */
+export async function verifyDispatchRecordManifest(stateDir, record) {
+  const digest = record?.manifest_digest;
+  if (typeof digest !== "string" || !SHA256.test(digest)) return false;
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(join(stateDir, "dispatch", `promotion-${digest}.json`), "utf8"));
+  } catch {
+    // A named manifest that is missing or unreadable is not authority.
+    return false;
+  }
+  if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) return false;
+  const { manifest_digest: claimed, ...body } = manifest;
+  if (claimed !== digest) return false;
+  if (sha256(canonicalJson(body)) !== digest) return false;
+  // The manifest must authorize the exact mode the record grants.
+  return manifest.target_mode === record.mode;
+}
+
+/**
  * Read the durable mode. This must accept EXACTLY what the runtime accepts
  * (readPromotedDispatchMode in runtime/composition.ts): if the two readers
  * disagree, `--expect-current` would compare against a mode that is not the one
- * actually in force.
+ * actually in force. Both apply the shape check AND resolve the bound manifest.
  */
 export async function readDispatchMode(stateDir, now = Date.now()) {
   try {
-    return acceptDispatchRecord(JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8")), now);
+    const record = JSON.parse(await readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
+    const mode = acceptDispatchRecord(record, now);
+    if (mode === null) return null;
+    return (await verifyDispatchRecordManifest(stateDir, record)) ? mode : null;
   } catch {
     return null;
   }
@@ -305,6 +341,23 @@ export async function commitDispatchMode(stateDir, manifest, expectedCurrentMode
 }
 
 async function writeDispatchRecords(dir, manifest) {
+  // ORDER IS LOAD-BEARING: the manifest lands BEFORE the record that names it.
+  // Both readers refuse a record whose manifest is absent, so publishing the
+  // record first would leave a window — and a crash-shaped permanent state — where
+  // the record grants nothing. Manifest-then-record means the record is never
+  // valid before the evidence it points at exists.
+  const manifestPath = join(dir, `promotion-${manifest.manifest_digest}.json`);
+  const manifestTemp = `${manifestPath}.tmp`;
+  const manifestHandle = await open(manifestTemp, "w", 0o600);
+  try {
+    await manifestHandle.writeFile(`${canonicalJson(manifest)}\n`, "utf8");
+    await manifestHandle.sync();
+  } finally {
+    await manifestHandle.close();
+  }
+  // The manifest itself is digest-addressed and never overwritten.
+  await rename(manifestTemp, manifestPath);
+
   const record = { schema_version: "agentdash.dispatch-mode/v1", mode: manifest.target_mode, auto_activation_enabled: manifest.auto_activation.enabled === true, manifest_digest: manifest.manifest_digest, promoted_at: manifest.created_at, expires_at: manifest.expires_at };
   const temporary = join(dir, `mode.${manifest.manifest_digest.slice(0, 16)}.tmp`);
   const handle = await open(temporary, "w", 0o600);
@@ -315,18 +368,6 @@ async function writeDispatchRecords(dir, manifest) {
     await handle.close();
   }
   await rename(temporary, join(dir, "mode.json"));
-
-  // The manifest itself is digest-addressed and never overwritten.
-  const manifestPath = join(dir, `promotion-${manifest.manifest_digest}.json`);
-  const manifestTemp = `${manifestPath}.tmp`;
-  const manifestHandle = await open(manifestTemp, "w", 0o600);
-  try {
-    await manifestHandle.writeFile(`${canonicalJson(manifest)}\n`, "utf8");
-    await manifestHandle.sync();
-  } finally {
-    await manifestHandle.close();
-  }
-  await rename(manifestTemp, manifestPath);
   return { mode_path: join(dir, "mode.json"), manifest_path: manifestPath };
 }
 
