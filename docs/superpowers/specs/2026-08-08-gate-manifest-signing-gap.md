@@ -2,7 +2,7 @@
 tags:
   - type/spec
   - project/agentdash
-  - status/open-decision
+  - status/resolved
 type: spec
 project: agentdash
 status: active
@@ -12,8 +12,72 @@ aliases:
 
 # GateManifestV1 signing gap
 
-**Status: open decision. No code has been written for this. It blocks every
-remaining step of the CEO Mission Control MVP.**
+**Status: RESOLVED (option A, approved 2026-08-08). Implemented in
+`scripts/mission-control/sign-gate-manifest.mjs` and the `authenticateGateEvidence`
+seam in `promote-gates.mjs`. This note is kept as the design record and the audit
+trail.**
+
+## Resolution
+
+The five open questions were answered from the plan's own text:
+
+1. **Attests to** — the accepted proof set (gate id + evidence digest + external
+   commit + binary digest), the computed conjunction, the validity window, the named
+   reviewer, and the key id/generation.
+2. **Key** — machine-local at `AGENTDASH_STATE_DIR/security/gate-signing-key.json`,
+   never committed, read only as a real regular file (never a symlink).
+3. **"Reviewed"** — a separate explicit operator action with a named `operator_id`.
+   The probe cannot sign its own output; automation signing its own evidence would
+   attest to nothing, which is what `SIGNING_REASON` already said.
+4. **Rotation** — key id and generation are bound; a rotated generation invalidates
+   older manifests.
+5. **Fail-closed** — absent, malformed, wrong-key, rotated, tampered, expired,
+   not-`go`, and wrong-location are each distinct refusals. Anything unverifiable is
+   a refusal, never a pass.
+
+HMAC-SHA256 over canonical JSON with a constant-time compare, deliberately mirroring
+the operator-signed qualification envelope in `routes/qualification-runner.ts` rather
+than introducing a second scheme. Manifests also bind a normalized digest of the
+state dir they were reviewed for, because the plan calls promotion "an explicit local
+operator action".
+
+Authentication lives in its own seam, checked once at the CLI boundary. A first
+attempt buried it inside `evaluatePromotion`, which broke 32 tests and forced every
+evidence-validating caller to also authenticate — the same two-layer duplication that
+had already caused one real reader-divergence bug. The seam was moved rather than the
+fixtures patched.
+
+### Audit outcome
+
+Three adversarial lenses attacked it. The cryptographic core held: no HMAC collision
+between distinct bodies, canonicalization stable (key order, no type-confusion
+collision, no literal `undefined` in a signed body), signature checked before the
+conjunction, rotation and expiry enforced independently, no secret reaching stdout,
+stderr, a stack, or any persisted artifact across four CLI failure paths, and no
+prototype pollution.
+
+Five real findings were fixed:
+
+- the signing key was read with a bare `readFile`, following symlinks, while the
+  evidence paths in the same codebase already rejected symlinked evidence;
+- a manifest carried no location binding, so with the same key material in two state
+  dirs a manifest signed for one promoted the other (reproduced end to end);
+- the constant-time comparison was not load-bearing in the suite;
+- `main()`'s enforcement of the authentication result could be deleted with all 127
+  tests still green — the same class as an earlier spliced-out function that crashed
+  every real CLI run;
+- several guards leaned on a neighbouring check rather than being pinned individually.
+
+Mutation swept: 24 of 24 signing guards caught, 28 of 28 promotion guards caught.
+Run `node scripts/mission-control/mutation-sweep-signing.cjs`.
+
+One guard is deliberately untested: the own-property read in `loadSigningKey`.
+`JSON.parse` already makes a literal `"__proto__"` key an own data property that does
+not affect prototype lookup, so it has no reachable failure today. It guards a future
+non-JSON parser. The mutation was removed from the sweep rather than covered by an
+assertion that cannot fail.
+
+## Original finding (kept for the record)
 
 ## The finding
 
