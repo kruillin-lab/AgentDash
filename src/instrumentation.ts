@@ -19,8 +19,17 @@ import { parseDispatchMode } from "./server/mission-control/runtime/dispatch-mod
 // ---------------------------------------------------------------------------
 
 export async function register(): Promise<void> {
-  // Normalize the dispatch mode to an exact, fail-closed value.
-  process.env.MISSION_CONTROL_DISPATCH = parseDispatchMode(process.env.MISSION_CONTROL_DISPATCH);
+  // Normalize the dispatch mode to an exact, fail-closed value — but ONLY when the
+  // operator actually set one. Unconditionally assigning parseDispatchMode(...) wrote
+  // the literal "disabled" when the variable was absent, and resolveDispatchMode
+  // treats a PRESENT env value as a restriction. That made the env var always
+  // restrict, so a legitimately promoted `candidate` or `enabled` record could never
+  // take effect: the durable promotion record was silently overridden by a value
+  // nobody set. An absent variable must stay absent so it restricts nothing.
+  const configuredDispatch = process.env.MISSION_CONTROL_DISPATCH;
+  if (configuredDispatch !== undefined && configuredDispatch !== "") {
+    process.env.MISSION_CONTROL_DISPATCH = parseDispatchMode(configuredDispatch);
+  }
 
   // Only the Node.js runtime owns local state and the controller lease.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;

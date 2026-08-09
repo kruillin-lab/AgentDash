@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { canonicalDigest } from "../../../lib/mission-control/contracts/common";
+import { buildMissionControlHealth } from "../policy/health";
 import { getMissionControlController, stopMissionControlController } from "./composition";
 import { MissionControlController } from "./controller";
 import { RecoveryOutbox } from "./outbox";
@@ -162,6 +163,28 @@ describe("mission control composition root", () => {
     expect(controller?.gate("model_backed").allowed).toBe(false);
   });
 
+  test("a promoted mode survives instrumentation's normalization when no env var is set", async () => {
+    // Found by testing a RUNNING server: instrumentation unconditionally assigned
+    // process.env.MISSION_CONTROL_DISPATCH = parseDispatchMode(...), which wrote the
+    // literal "disabled" when the variable was absent. resolveDispatchMode treats a
+    // PRESENT env value as a restriction, so the env var always restricted and a
+    // legitimately promoted mode could never take effect. Run the real register()
+    // exactly as the server does, then assert the promotion still holds.
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    delete process.env.MISSION_CONTROL_DISPATCH;
+    await writePromotion(stateDir, "candidate");
+
+    const { register } = await import("../../../instrumentation");
+    await register();
+
+    const controller = await getMissionControlController();
+    expect(controller?.mode).toBe("candidate");
+    expect(controller?.gate("candidate").allowed).toBe(true);
+    // Still fail-closed for model-backed work, which requires `enabled`.
+    expect(controller?.gate("model_backed").allowed).toBe(false);
+  });
+
   test("an env var may narrow a promoted mode for rollback", async () => {
     const stateDir = await stateRoot();
     process.env.AGENTDASH_STATE_DIR = stateDir;
@@ -217,5 +240,24 @@ describe("mission control composition root", () => {
     process.env.MISSION_CONTROL_DISPATCH = "enabled";
 
     expect(await getMissionControlController()).toBeNull();
+  });
+
+  test("the env var alone never puts a mode in force, so health cannot report one", async () => {
+    // Found by testing a RUNNING server, not by the suite: the health routes read
+    // process.env.MISSION_CONTROL_DISPATCH directly and reported `enabled` from the
+    // env var alone while the controller was `disabled`. Health must project the
+    // mode actually in force.
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    process.env.MISSION_CONTROL_DISPATCH = "enabled";
+    // No promotion record at all, plus a fabricated one — neither may grant.
+    const controller = await getMissionControlController();
+    expect(controller?.mode).toBe("disabled");
+    expect(buildMissionControlHealth({
+      now: "2026-08-09T00:00:00.000Z",
+      dispatch_mode: controller?.mode ?? "disabled",
+      proofs: [],
+      auto_snapshot: null,
+    }).dispatch.mode).toBe("disabled");
   });
 });

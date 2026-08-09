@@ -22,8 +22,14 @@ export interface MissionControlHealthV1 {
 
 export interface MissionControlHealthInput {
   now: string;
-  /** Raw MISSION_CONTROL_DISPATCH value; normalized fail-closed. */
-  dispatch_env: unknown;
+  /**
+   * The mode actually IN FORCE, as resolved by the controller — never the raw
+   * MISSION_CONTROL_DISPATCH value on its own. The env var may only RESTRICT the
+   * durable promotion record (see resolveDispatchMode), so reporting it directly
+   * lets health display `enabled` while the controller is `disabled`. Still
+   * normalized fail-closed here, so an unknown value reads as `disabled`.
+   */
+  dispatch_mode: unknown;
   /** Current proof manifest rows (redacted). Empty when no evidence exists. */
   proofs?: Array<{ id: string; expires_at: string | null }>;
   /** The auto-eligibility snapshot; null when no proven snapshot exists. */
@@ -31,7 +37,7 @@ export interface MissionControlHealthInput {
 }
 
 export function buildMissionControlHealth(input: MissionControlHealthInput): MissionControlHealthV1 {
-  const mode = parseDispatchMode(input.dispatch_env);
+  const mode = parseDispatchMode(input.dispatch_mode);
   const proofs = input.proofs ?? [];
 
   // Dispatch is ready only in `enabled` with every gate proven. With no proof
