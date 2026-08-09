@@ -285,26 +285,21 @@ export function createCommandRunner(dependencies: CommandRunnerDependencies = {}
           return false;
         }
       };
-      const waitBeforeTerminationRetry = async (): Promise<void> => {
-        if (platform === "win32" && closeResult) throw new CommandTerminationError();
-        if (platform !== "win32") {
-          await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, terminationRetryMs));
-          return;
-        }
-        await Promise.race([
-          new Promise<void>((resolveDelay) => setTimeout(resolveDelay, terminationRetryMs)),
-          closed.then(() => { throw new CommandTerminationError(); }),
-        ]);
-      };
+      // Windows ordering guard. A parent close is not a verdict by itself: taskkill /T /F exiting
+      // 0 means the tree was signalled, and on a loaded box that answer costs ~1s to arrive while
+      // the parent it kills dies in ~4ms, so the close and the terminator's exit land in either
+      // order. Aborting the attempt budget the moment a close appeared let that coin flip decide,
+      // and reported termination_unconfirmed for a kill that had worked. The budget now always
+      // plays out and stop() decides from BOTH facts; a close with no confirmed signal still
+      // fails closed there.
       const terminateWithRetries = async (force: boolean): Promise<void> => {
         for (let attempt = 1; attempt <= terminationAttempts; attempt += 1) {
-          if (platform === "win32" && closeResult) throw new CommandTerminationError();
           try {
             await terminateTree(processTreeTarget, force);
             return;
           } catch {
-            if (attempt === terminationAttempts || (platform === "win32" && closeResult)) throw new CommandTerminationError();
-            await waitBeforeTerminationRetry();
+            if (attempt === terminationAttempts) throw new CommandTerminationError();
+            await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, terminationRetryMs));
           }
         }
       };
@@ -335,6 +330,8 @@ export function createCommandRunner(dependencies: CommandRunnerDependencies = {}
               gracefulConfirmed = false;
             }
 
+            // Both facts, not whichever landed first: no attempt confirmed a signal AND the parent
+            // is gone, so the tree can no longer be reached through its pid nor verified.
             if (!gracefulConfirmed) {
               if (closeResult) throw new CommandTerminationError();
             } else if (await waitForClose(terminationGraceMs)) {

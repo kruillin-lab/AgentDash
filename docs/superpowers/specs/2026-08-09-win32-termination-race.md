@@ -57,9 +57,41 @@ other, and the order flips run to run. That coin flip decides the result:
    CommandTerminationError(); }`. A closed parent is exactly the state reached in
    step 1, so this always throws.
 
-Net effect: **when the parent closes before `taskkill` finishes, termination is
-guaranteed to report `termination_unconfirmed`** — even though the tree really was
-killed. The test asserts the happy path resolves, so it fails.
+Net effect: **when a terminate attempt fails while the parent has already closed, the
+retry budget is cancelled and termination reports `termination_unconfirmed`** — even
+though the tree really was killed. `taskkill` exits non-zero whenever a tree member it
+enumerated exits on its own before it gets to kill it, which is common precisely when
+the whole tree is dying at once, so this is reachable in production.
+
+## Correction: this is not what was failing the tests
+
+The paragraph above is right about the code and wrong about the symptom. The three
+tests do not fail with `termination_unconfirmed` — `expect(pending).resolves` passes
+and the sentinel assertion after it fails, so the runner reported success and the
+grandchild had written its file.
+
+Measured on this machine, 2026-08-09, spawning `taskkill.exe` exactly the way
+`terminateWithTaskkill` does:
+
+```text
+taskkill /PID <parent> /T /F   cost: 844-1436 ms over 5 clean trials, exit 0 in 5/5
+grandchild dead when taskkill returned: 5/5     sentinel never written: 5/5
+```
+
+The cost is process creation for the helper, not the kill. The three tests gave the
+grandchild an 800 ms fuse (1500 ms against a 750 ms timeout, so a 750 ms budget), which
+is **shorter than the terminator's own latency under load**. The grandchild therefore
+raced the mechanism, not the guarantee, and won whenever the box was busy. That is the
+real reason the failure count tracked CPU load.
+
+An earlier probe of my own reproduced "grandchild survives, taskkill exits 255" and
+looked like proof that `/T` does not reap grandchildren. It was the same artifact: the
+fuse was still shorter than the terminator, so the grandchild had already written and
+exited before the kill phase. With a fuse clear of the measured cost the effect
+disappears entirely. The 255 exits are real but mean something narrower — a member that
+exited between `taskkill`'s enumeration and its kill, reported as "There is no running
+instance of the task". That is exactly the partial failure that trips the ordering race
+above.
 
 ## Why the guard exists, and why it is still wrong
 
@@ -81,9 +113,23 @@ parent-closed case as the unverified one.
 
 **A. Verify extinction on Windows, like the POSIX path.** After `taskkill` returns 0,
 poll for the tree actually being gone (the recorded grandchild PIDs, or a
-`taskkill /PID <pid> /T` dry probe) and treat verified-extinct as confirmed
-regardless of close ordering. Closes the race without weakening the guarantee.
-Most faithful; needs a reliable Windows tree-enumeration seam.
+`taskkill /PID <pid> /T` dry probe) and treat verified-extinct as confirmed regardless
+of close ordering. ~~Closes the race without weakening the guarantee.~~ **That sentence
+was wrong.** Neither seam it proposes verifies what the guard protects:
+
+- There are no "recorded grandchild PIDs". Nothing in this process observes the tree —
+  the child is spawned with piped stdio and no enumeration, so the only PID we ever
+  hold is the parent's, and descendants spawned after any hypothetical snapshot are
+  invisible by construction.
+- A `taskkill /PID <pid> /T` dry probe reports on the root, not the tree. Once the
+  parent is gone it returns "not found" whether or not descendants are still running —
+  which is precisely the unverified state the guard exists for, answered as if it were
+  the verified one.
+
+So A does not close the race *without* weakening the guarantee; it needs real tree
+enumeration first, and with `/T` replaced by explicit per-PID kills it would also have
+to enumerate before killing rather than after. That is a materially larger change than
+the race warrants.
 
 **B. Order the wait so a fast close is not fatal.** `taskkill` exiting 0 already
 means the tree was signalled. Await both the close and the terminator, then decide,
@@ -93,11 +139,21 @@ rather than letting whichever fires first determine the verdict.
 it hides a production path that reports failure on a successful kill. Every abort
 that loses this coin flip surfaces as `termination_unconfirmed` to the operator.
 
-## Recommendation
+## Resolution
 
-**A**, with **B** as the fallback if a trustworthy enumeration seam is not available.
-Not C — the flake is the symptom, and silencing the test leaves real aborts randomly
-reporting failure.
+**B, implemented.** The four `closeResult` short-circuits are gone from
+`terminateWithRetries`; the bounded attempt budget always plays out and `stop()` decides
+from both facts afterwards. The fail-closed intent is untouched and now pinned: a parent
+that closed with no attempt ever confirming a signal still rejects, in `stop()`.
+
+Both halves are mutation-pinned in `scripts/mission-control/mutation-sweep-runtime.cjs`
+(`win32 close does not cancel retries`, `unconfirmed win32 close fails closed`) —
+restoring either short-circuit fails a test.
+
+Separately, the three tree tests now give the grandchild a 5 s fuse instead of 800 ms.
+The assertion is unchanged — the grandchild must never get to act — but it no longer
+encodes an undocumented 800 ms termination deadline that the mechanism cannot meet.
+Termination stays bounded by `DEFAULT_TERMINATION_GRACE_MS`.
 
 ## Impact
 
@@ -114,5 +170,6 @@ unresolved external operation.
 npx vitest run --config vitest.config.ts src/server/hermes/command.test.ts
 ```
 
-Fails 1-3 of 24 non-deterministically. The three affected tests all take the
-abort/timeout/output-limit termination path.
+Before the fix: failed 1-3 of 24 non-deterministically, always in the three
+abort/timeout/output-limit tree tests. After: 26 of 26, stable across repeated runs
+under the same load. The extra two are the guards pinning this fix.

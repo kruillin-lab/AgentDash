@@ -12,12 +12,19 @@
 // thing that GRANTS dispatch authority, MISSION_CONTROL_DISPATCH may only RESTRICT
 // it, and a record is authority only if the manifest it names actually backs it.
 //
+// It also covers the runtime's other terminal decision: whether a cancelled or
+// aborted command's process tree was actually killed. An unconfirmed termination
+// terminalizes `inconsistent`, so the two guards that decide it are pinned here for
+// the same reason - a wrong answer becomes a durable record of unresolved external
+// activity.
+//
 // Run: node scripts/mission-control/mutation-sweep-runtime.cjs
 const { sweep, report, VITEST } = require("./mutation-runner.cjs");
 
 const COMPOSITION = ["src/server/mission-control/runtime/composition.test.ts"];
 const INSTRUMENTATION = ["src/instrumentation.test.ts"];
 const BOTH = [...COMPOSITION, ...INSTRUMENTATION];
+const HERMES_COMMAND = ["src/server/hermes/command.test.ts"];
 
 const TARGETS = [
   ["src/server/mission-control/runtime/composition.ts", [
@@ -47,6 +54,16 @@ const TARGETS = [
     // The env var may only RESTRICT; it must never grant.
     ["env may only restrict", "  return authorityRank(env) < authorityRank(stored) ? env : stored;", "  return env;", VITEST, BOTH],
     ["absent env restricts nothing", "  if (!envPresent) return stored;", "  if (!envPresent) return parseDispatchMode(input.envMode);", VITEST, BOTH],
+  ]],
+  ["src/server/hermes/command.ts", [
+    // The win32 ordering guard. Restoring the abort-on-close short-circuit reinstates the
+    // race: taskkill's exit lands ~1ms after the close of the parent it just killed, so
+    // whichever fired first decided the verdict and a successful kill reported
+    // termination_unconfirmed.
+    ["win32 close does not cancel retries", "            if (attempt === terminationAttempts) throw new CommandTerminationError();", '            if (attempt === terminationAttempts || (platform === "win32" && closeResult)) throw new CommandTerminationError();', VITEST, HERMES_COMMAND],
+    // The guard that ordering fix must not weaken: a parent gone with nothing confirmed is
+    // an unreachable, unverified tree and must stay fatal.
+    ["unconfirmed win32 close fails closed", "              if (closeResult) throw new CommandTerminationError();", "", VITEST, HERMES_COMMAND],
   ]],
   ["src/instrumentation.ts", [
     ["nodejs runtime only", '  if (process.env.NEXT_RUNTIME !== "nodejs") return;', "", VITEST, INSTRUMENTATION],

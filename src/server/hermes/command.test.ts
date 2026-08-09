@@ -12,6 +12,19 @@ const executable = process.execPath;
 const allowedExecutables = [executable];
 const temporaryDirectories: string[] = [];
 
+// Measured on a loaded Windows box, five clean trials: taskkill.exe costs 0.84-1.44s of process
+// creation, while the parent it kills dies in ~4ms. The three tree tests below used an 800ms
+// grandchild fuse, so the grandchild beat the terminator to its own sentinel and the tests raced
+// the mechanism instead of asserting the guarantee. The assertion is unchanged - the grandchild
+// must never get to act - only its fuse now clears the measured cost of killing it. Termination
+// itself stays bounded by DEFAULT_TERMINATION_GRACE_MS, which this stays well inside.
+const GRANDCHILD_FUSE_MS = 5_000;
+const TREE_TERMINATION_TIMEOUT_MS = 30_000;
+
+function afterGrandchildFuse(): Promise<void> {
+  return new Promise<void>((resolveWait) => setTimeout(resolveWait, GRANDCHILD_FUSE_MS + 500));
+}
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "agentdash-command-test-"));
   temporaryDirectories.push(directory);
@@ -209,6 +222,69 @@ describe("runCommand", () => {
     expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, false]);
   });
 
+  // Production break caught: taskkill costs ~1s while the parent it kills dies in ~4ms, so the
+  // parent's close and the terminator's own exit land in either order, flipping run to run. The
+  // retry loop used to abort the moment a close appeared, so whenever the parent won that coin
+  // flip a kill that had actually worked was reported as termination_unconfirmed - which the
+  // cancellation rules terminalize as inconsistent.
+  test("does not let a win32 parent close cancel a termination retry that then confirms", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4246, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn()
+      // The pass reaps the tree and the parent closes, then taskkill reports a partial failure
+      // because one member exited on its own between the enumeration and the kill.
+      .mockImplementationOnce(async () => {
+        child.emit("close", null, "SIGKILL");
+        throw new Error("one tree member was already gone");
+      })
+      .mockResolvedValueOnce(undefined);
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      platform: "win32",
+      terminationGraceMs: 1_000,
+      terminationForceMs: 1_000,
+      terminationAttempts: 2,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, false]);
+  });
+
+  // The guard the ordering fix must not weaken: a parent that vanished while no attempt ever
+  // confirmed a signal leaves the tree unreachable through that pid, so a later forced pass
+  // reporting success proves nothing about grandchildren it can no longer name.
+  test("still fails closed when a win32 parent closes with no confirmed termination", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4247, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn(async (_target: unknown, force: boolean) => {
+      if (force) return;
+      child.emit("close", null, null);
+      throw new Error("the tree could not be reached");
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      platform: "win32",
+      terminationGraceMs: 50,
+      terminationForceMs: 50,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false]);
+  });
+
   // Production break caught: swallowed kill failures previously returned a successful-looking
   // stopped result even though the process tree could still be using the disposable directory.
   test("rejects with a fixed error when both process-tree termination attempts fail", async () => {
@@ -287,7 +363,7 @@ describe("runCommand", () => {
   test("confirms the complete process tree is gone before a timeout resolves", async () => {
     const directory = await temporaryDirectory();
     const sentinel = join(directory, "grandchild-survived.txt");
-    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 1_500)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
@@ -303,15 +379,15 @@ describe("runCommand", () => {
     });
 
     expect(result.timedOut).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    await afterGrandchildFuse();
     await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, TREE_TERMINATION_TIMEOUT_MS);
 
   test("confirms the complete process tree is gone before abort resolution", async () => {
     const directory = await temporaryDirectory();
     const ready = join(directory, "parent-ready.txt");
     const sentinel = join(directory, "abort-grandchild-survived.txt");
-    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       "const fs = require('node:fs')",
@@ -333,14 +409,14 @@ describe("runCommand", () => {
 
     controller.abort();
     await expect(pending).resolves.toMatchObject({ aborted: true });
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await afterGrandchildFuse();
     await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, TREE_TERMINATION_TIMEOUT_MS);
 
   test("confirms the complete process tree is gone before output-limit resolution", async () => {
     const directory = await temporaryDirectory();
     const sentinel = join(directory, "output-grandchild-survived.txt");
-    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), 800)`;
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
     const parent = [
       "const { spawn } = require('node:child_process')",
       `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
@@ -357,9 +433,9 @@ describe("runCommand", () => {
     });
 
     expect(result.outputLimitExceeded).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await afterGrandchildFuse();
     await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, TREE_TERMINATION_TIMEOUT_MS);
 
   // Production break caught: unbounded model output could exhaust server memory.
   test("terminates and caps combined output", async () => {
