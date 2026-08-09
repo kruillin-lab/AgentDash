@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -810,4 +810,80 @@ test("a signed manifest carrying a no_go conjunction cannot authorize dispatch",
   assert.equal(auth.ok, false);
   // Either the signature or the conjunction may catch it; both are fail-closed.
   assert.match(auth.reason, /signature|not go/i);
+});
+
+// ---------------------------------------------------------------------------
+// The CLI must ACT on the authentication result, not merely compute it.
+//
+// Unit-testing authenticateGateEvidence proves the decision; only a real-process
+// run proves main() enforces it. Deleting the enforcement block previously left all
+// 127 tests green — the same gap that let a deleted readLatestSnapshot ship.
+// ---------------------------------------------------------------------------
+
+function runPromote(stateDir, args) {
+  return spawnSync(process.execPath, ["scripts/mission-control/promote-gates.mjs", ...args],
+    { encoding: "utf8", env: { ...process.env, AGENTDASH_STATE_DIR: stateDir } });
+}
+
+test("the CLI refuses unsigned evidence with a nonzero exit and writes nothing", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "promote-cli-unsigned-"));
+  try {
+    await mkdir(join(stateDir, "security"), { recursive: true });
+    await writeFile(join(stateDir, "security", "gate-signing-key.json"), JSON.stringify(SIGNING_KEY), "utf8");
+
+    // A complete, current, but UNSIGNED probe snapshot.
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const unsigned = { ...fullSnapshot(), expires_at: future };
+    unsigned.proofs = unsigned.proofs.map((proof) => ({ ...proof, expires_at: future }));
+    const evidencePath = join(stateDir, "unsigned.json");
+    await writeFile(evidencePath, JSON.stringify(unsigned), "utf8");
+
+    const result = runPromote(stateDir, ["--mode=candidate", `--evidence=${evidencePath}`, "--expect-current=disabled", "--promote"]);
+    const output = `${result.stdout}${result.stderr}`;
+
+    assert.equal(result.status, 1, output);
+    assert.match(output, /requires a signed GateManifestV1/i, output);
+    // Nothing may be promoted on a refusal.
+    await assert.rejects(readFile(join(stateDir, "dispatch", "mode.json"), "utf8"));
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("the CLI refuses a manifest signed for another location", async () => {
+  const dirA = await mkdtemp(join(tmpdir(), "promote-cli-a-"));
+  const dirB = await mkdtemp(join(tmpdir(), "promote-cli-b-"));
+  try {
+    for (const dir of [dirA, dirB]) {
+      await mkdir(join(dir, "security"), { recursive: true });
+      await writeFile(join(dir, "security", "gate-signing-key.json"), JSON.stringify(SIGNING_KEY), "utf8");
+    }
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    const snap = { ...fullSnapshot(), expires_at: future };
+    snap.proofs = snap.proofs.map((proof) => ({ ...proof, expires_at: future }));
+    // Signed FOR dirA.
+    const signed = buildGateManifest({
+      snapshot: snap,
+      reviewer: { operator_id: "operator-luis", reviewed_at: new Date().toISOString() },
+      key: SIGNING_KEY,
+      now: new Date().toISOString(),
+      stateDir: dirA,
+    });
+    const evidencePath = join(dirA, "signed.json");
+    await writeFile(evidencePath, JSON.stringify(signed), "utf8");
+
+    // Used against dirB.
+    const result = runPromote(dirB, ["--mode=candidate", `--evidence=${evidencePath}`, "--expect-current=disabled", "--promote"]);
+    const output = `${result.stdout}${result.stderr}`;
+    assert.equal(result.status, 1, output);
+    assert.match(output, /different location|state dir/i, output);
+    await assert.rejects(readFile(join(dirB, "dispatch", "mode.json"), "utf8"));
+
+    // Against its own location it succeeds, so the refusal is not blanket.
+    const ok = runPromote(dirA, ["--mode=candidate", `--evidence=${evidencePath}`, "--expect-current=disabled", "--promote"]);
+    assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr}`);
+  } finally {
+    await rm(dirA, { recursive: true, force: true });
+    await rm(dirB, { recursive: true, force: true });
+  }
 });

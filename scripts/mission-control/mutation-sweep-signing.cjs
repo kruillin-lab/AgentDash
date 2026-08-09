@@ -28,6 +28,7 @@ const TARGETS = [
   ["scripts/mission-control/promote-gates.mjs", [
     ["unsigned refusal", "if (!isSignedManifest) {", "if (false) {"],
     ["signing key required", "if (!signingKey) {", "if (false) {"],
+    ["CLI enforces authentication", "if (!authenticated.ok) {", "if (false) {"],
   ]],
 ];
 
