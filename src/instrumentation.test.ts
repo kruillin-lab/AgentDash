@@ -1,8 +1,12 @@
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { register } from "./instrumentation";
 
-const ENV_KEYS = ["MISSION_CONTROL_DISPATCH"] as const;
+const ENV_KEYS = ["MISSION_CONTROL_DISPATCH", "AGENTDASH_STATE_DIR", "NEXT_RUNTIME"] as const;
 const saved: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -26,6 +30,26 @@ describe("mission control instrumentation", () => {
     process.env.MISSION_CONTROL_DISPATCH = "ENABLED";
     register();
     expect(process.env.MISSION_CONTROL_DISPATCH).toBe("disabled");
+  });
+
+  test("a non-nodejs runtime never acquires the controller lease", async () => {
+    // An independent mutation sweep found deleting the NEXT_RUNTIME guard changed no
+    // test result. The edge/client graphs must never load the Node-only composition
+    // root or contend the single controller-owner lease. Observable contract: on a
+    // non-nodejs runtime, register() writes no lease file into the state dir.
+    const saved = process.env.NEXT_RUNTIME;
+    const stateDir = await mkdtemp(join(tmpdir(), "agentdash-instr-"));
+    try {
+      process.env.NEXT_RUNTIME = "edge";
+      process.env.AGENTDASH_STATE_DIR = stateDir;
+      await register();
+      // A nodejs register() acquires the lease under mission-control/controller-owner.
+      await expect(stat(join(stateDir, "mission-control", "controller-owner", "owner.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (saved === undefined) delete process.env.NEXT_RUNTIME;
+      else process.env.NEXT_RUNTIME = saved;
+      await rm(stateDir, { recursive: true, force: true });
+    }
   });
 
   test("an absent dispatch mode stays absent so it restricts nothing", () => {

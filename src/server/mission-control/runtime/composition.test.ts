@@ -242,6 +242,46 @@ describe("mission control composition root", () => {
     expect(await getMissionControlController()).toBeNull();
   });
 
+  test("a relative state directory is refused, never resolved against the CWD", async () => {
+    // An independent mutation sweep found dropping the isAbsolute() check changed no
+    // test result. A relative path would resolve against the server's working
+    // directory, so the owner lease, outbox and dispatch record would silently land
+    // somewhere unintended — possibly inside the repository, which the runbook
+    // forbids. State must be an exact machine-local absolute path or nothing.
+    process.env.MISSION_CONTROL_DISPATCH = "enabled";
+    for (const relative of ["state", "./state", "..\\state", ""]) {
+      process.env.AGENTDASH_STATE_DIR = relative;
+      expect(await getMissionControlController()).toBeNull();
+    }
+  });
+
+  test("a dormant adapter method throws rather than silently doing nothing", async () => {
+    // The dormant ports are the backstop BEHIND the dispatch gate: advanceCommand
+    // refuses at the gate first, which is why an independent sweep found gutting
+    // dormantPort to a no-op changed no test result. The comment claims no code path
+    // can reach a worker transport, so the backstop itself must be pinned — a no-op
+    // proxy would let a future caller that got past the gate proceed silently.
+    //
+    // Driving this through advanceCommand does NOT work: it throws on
+    // proposals.load() (CommandIdSchema.parse) long before any adapter is touched. My
+    // first attempt asserted /dormant|not connected/i and passed against that Zod
+    // error — a vacuous test. Exercise the port contract directly instead.
+    const stateDir = await stateRoot();
+    process.env.AGENTDASH_STATE_DIR = stateDir;
+    delete process.env.MISSION_CONTROL_DISPATCH;
+    await writePromotion(stateDir, "enabled");
+    const controller = await getMissionControlController();
+    expect(controller?.gate("model_backed").allowed).toBe(true);
+
+    // Reach the dormant adapters the composition root actually wired in.
+    const runner = (controller as unknown as { runner: { hermes: Record<string, () => unknown>; codeg: Record<string, () => unknown> } }).runner;
+    for (const [label, port] of [["hermes", runner.hermes], ["codeg", runner.codeg]] as const) {
+      expect(typeof port.prepareAction).toBe("function");
+      // Must THROW, not return undefined: a silent no-op is the failure mode.
+      expect(() => port.prepareAction(), `${label} adapter must refuse loudly`).toThrow(/dormant|not connected/i);
+    }
+  });
+
   test("the env var alone never puts a mode in force, so health cannot report one", async () => {
     // Found by testing a RUNNING server, not by the suite: the health routes read
     // process.env.MISSION_CONTROL_DISPATCH directly and reported `enabled` from the
