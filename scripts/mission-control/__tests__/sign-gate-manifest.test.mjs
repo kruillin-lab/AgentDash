@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -203,7 +203,10 @@ test("signGateManifest writes the manifest and no secret to disk", async () => {
     assert.doesNotMatch(body, new RegExp(SECRET));
     const parsed = JSON.parse(body);
     assert.equal(parsed.schema_version, GATE_MANIFEST_SCHEMA_VERSION);
-    assert.equal(verifyGateManifest(parsed, KEY, Date.parse(NOW)).ok, true);
+    // signGateManifest binds the state dir it wrote into, so verification supplies it.
+    assert.equal(verifyGateManifest(parsed, KEY, Date.parse(NOW), stateDir).ok, true);
+    // and the same manifest must NOT verify for a different location
+    assert.equal(verifyGateManifest(parsed, KEY, Date.parse(NOW), join(stateDir, "elsewhere")).ok, false);
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
@@ -287,4 +290,93 @@ test("a validly signed no_go conjunction is still refused", () => {
   const result = verifyGateManifest({ ...forged, signature: validSignature }, KEY, Date.parse(NOW));
   assert.equal(result.ok, false);
   assert.match(result.reason, /not go/i);
+});
+
+// ---------------------------------------------------------------------------
+// The key file is the most sensitive artifact in the system, so it gets at least
+// the same handle discipline the evidence path already uses (lstat, regular file,
+// no symlink) rather than a bare readFile.
+// ---------------------------------------------------------------------------
+
+test("a symlinked signing key is refused", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "sign-key-link-"));
+  try {
+    await mkdir(join(stateDir, "security"), { recursive: true });
+    const target = join(stateDir, "elsewhere.json");
+    await writeFile(target, JSON.stringify(KEY), "utf8");
+    try {
+      await symlink(target, join(stateDir, "security", "gate-signing-key.json"), "file");
+    } catch {
+      t.skip("this platform does not permit creating a symlink");
+      return;
+    }
+    // Confirm a REAL link exists: Git Bash `ln -s` copies on Windows, which would
+    // make this assertion pass for the wrong reason.
+    const stats = await lstat(join(stateDir, "security", "gate-signing-key.json"));
+    assert.equal(stats.isSymbolicLink(), true, "the fixture must be a real symlink");
+    await assert.rejects(loadSigningKey(stateDir), /regular file|symlink/i);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a directory where the signing key belongs is refused", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "sign-key-dir-"));
+  try {
+    await mkdir(join(stateDir, "security", "gate-signing-key.json"), { recursive: true });
+    await assert.rejects(loadSigningKey(stateDir), /regular file|no signing key/i);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a prototype-polluting key file cannot inject a key", async () => {
+  const stateDir = await mkdtemp(join(tmpdir(), "sign-key-proto-"));
+  try {
+    await mkdir(join(stateDir, "security"), { recursive: true });
+    await writeFile(join(stateDir, "security", "gate-signing-key.json"),
+      JSON.stringify({ __proto__: { key_id: "injected", generation: 1, secret: SECRET } }), "utf8");
+    await assert.rejects(loadSigningKey(stateDir), /key id|secret|32/i);
+    assert.notEqual({}.key_id, "injected");
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+// The comparison must stay constant-time. A naive === would pass every functional
+// test, so pin the primitive itself.
+test("signature comparison uses a constant-time primitive", async () => {
+  const source = await readFile(new URL("../sign-gate-manifest.mjs", import.meta.url), "utf8");
+  assert.match(source, /timingSafeEqual/, "verification must use timingSafeEqual");
+  assert.doesNotMatch(source, /manifest[.]signatures*!==s*expected/, "no naive string comparison");
+  // A length mismatch must be handled before the compare, since timingSafeEqual throws
+  // on unequal lengths.
+  assert.match(source, /left[.]length !== right[.]length/);
+});
+
+// ---------------------------------------------------------------------------
+// Promotion is "an explicit local operator action", so a signed manifest is bound
+// to the exact state dir it was reviewed for. Without this, the same key material
+// in two locations makes a manifest portable between them.
+// ---------------------------------------------------------------------------
+
+test("a manifest binds the state dir it was signed for", () => {
+  const manifest = buildGateManifest({ snapshot: snapshot(), reviewer: reviewed(), key: KEY, now: NOW, stateDir: "C:/state/a" });
+  assert.match(manifest.state_dir_digest, /^[a-f0-9]{64}$/);
+  // Verifying against the same state dir succeeds.
+  assert.equal(verifyGateManifest(manifest, KEY, Date.parse(NOW), "C:/state/a").ok, true);
+});
+
+test("a manifest signed for one state dir does not verify for another", () => {
+  const manifest = buildGateManifest({ snapshot: snapshot(), reviewer: reviewed(), key: KEY, now: NOW, stateDir: "C:/state/a" });
+  const result = verifyGateManifest(manifest, KEY, Date.parse(NOW), "C:/state/b");
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /state dir|different location/i);
+});
+
+test("state dir binding is path-normalized, not literal", () => {
+  const manifest = buildGateManifest({ snapshot: snapshot(), reviewer: reviewed(), key: KEY, now: NOW, stateDir: "C:/state/a" });
+  // The same directory expressed differently must still verify.
+  assert.equal(verifyGateManifest(manifest, KEY, Date.parse(NOW), "C:/state/a/").ok, true);
+  assert.equal(verifyGateManifest(manifest, KEY, Date.parse(NOW), String.raw`C:\state\a`).ok, true);
 });

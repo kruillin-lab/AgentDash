@@ -22,6 +22,8 @@ const TARGETS = [
     ["constant-time compare", "if (left.length !== right.length || !timingSafeEqual(left, right)) {", "if (false) {"],
     ["manifest expiry", 'if (typeof manifest.expires_at === "string" && Date.parse(manifest.expires_at) <= nowMs) {', "if (false) {"],
     ["signed conjunction go", 'if (manifest.dispatch?.status !== "go") {', "if (false) {"],
+    ["state dir binding", 'if (typeof manifest.state_dir_digest === "string") {', "if (false) {"],
+    ["key file symlink guard", "if (stats.isSymbolicLink() || !stats.isFile()) {", "if (false) {"],
   ]],
   ["scripts/mission-control/promote-gates.mjs", [
     ["unsigned refusal", "if (!isSignedManifest) {", "if (false) {"],

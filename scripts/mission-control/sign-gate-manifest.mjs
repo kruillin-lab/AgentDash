@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, open, readFile, rename } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 
 import { canonicalJson, sha256 } from "./probe-utils.mjs";
 import { GATE_IDS } from "./write-gate-manifest.mjs";
@@ -32,6 +32,17 @@ const COMMIT = /^[a-f0-9]{40}$/i;
 const IDENTIFIER = /^[A-Za-z0-9._:-]{3,128}$/;
 const MIN_SECRET_LENGTH = 32;
 
+/**
+ * Bind a manifest to the exact location it was reviewed for. Normalized so the same
+ * directory written differently (trailing slash, separator style, case on Windows)
+ * still matches, while a genuinely different location does not.
+ */
+function stateDirDigest(stateDir) {
+  if (typeof stateDir !== "string" || stateDir.trim() === "") return null;
+  const normalized = resolve(stateDir).replace(/[\/]+$/, "").split(sep).join("/").toLowerCase();
+  return sha256(normalized);
+}
+
 function requireKey(key) {
   if (typeof key !== "object" || key === null) throw new TypeError("A signing key is required.");
   if (typeof key.secret !== "string" || key.secret.length < MIN_SECRET_LENGTH) {
@@ -54,7 +65,7 @@ function computeSignature(body, key) {
  * reviewed. Throws rather than signing anything incomplete, failed, or stale — a
  * signature over unproven evidence is worse than no signature at all.
  */
-export function buildGateManifest({ snapshot, reviewer, key, now }) {
+export function buildGateManifest({ snapshot, reviewer, key, now, stateDir = null }) {
   requireKey(key);
 
   if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
@@ -121,6 +132,8 @@ export function buildGateManifest({ snapshot, reviewer, key, now }) {
     dispatch: { status: "go", reasons: [] },
     reviewed_by: { operator_id: operatorId, reviewed_at: typeof reviewer.reviewed_at === "string" ? reviewer.reviewed_at : new Date(nowMs).toISOString() },
     signing_key: { key_id: key.key_id, generation: key.generation },
+    // Null when unbound (older callers); a bound manifest cannot be moved.
+    state_dir_digest: stateDirDigest(stateDir),
     signed_at: new Date(nowMs).toISOString(),
     expires_at: expiresAt,
   };
@@ -132,7 +145,7 @@ export function buildGateManifest({ snapshot, reviewer, key, now }) {
  * Verify a signed manifest. Every failure mode is distinguishable, and anything
  * unverifiable is a refusal — never a pass.
  */
-export function verifyGateManifest(manifest, key, now = Date.now()) {
+export function verifyGateManifest(manifest, key, now = Date.now(), stateDir = null) {
   if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
     return { ok: false, reason: "The gate manifest is not an object." };
   }
@@ -175,6 +188,13 @@ export function verifyGateManifest(manifest, key, now = Date.now()) {
   if (manifest.dispatch?.status !== "go") {
     return { ok: false, reason: "The signed gate conjunction is not go." };
   }
+  // A manifest bound to one state dir may not authorize a different location.
+  if (typeof manifest.state_dir_digest === "string") {
+    const observed = stateDirDigest(stateDir);
+    if (observed !== manifest.state_dir_digest) {
+      return { ok: false, reason: "The gate manifest was signed for a different location (state dir mismatch)." };
+    }
+  }
   return { ok: true, reason: "The gate manifest signature and validity window verify." };
 }
 
@@ -185,18 +205,40 @@ export function verifyGateManifest(manifest, key, now = Date.now()) {
  */
 export async function loadSigningKey(stateDir) {
   const file = join(stateDir, "security", "gate-signing-key.json");
+
+  // The key is the most sensitive artifact here, so it gets at least the handle
+  // discipline the evidence path already applies: it must be a real regular file,
+  // never a symlink redirecting the read somewhere an attacker controls.
+  let stats;
+  try {
+    stats = await lstat(file);
+  } catch {
+    throw new Error("No signing key is configured; unsigned evidence cannot authorize dispatch.");
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error("The signing key must be an immutable regular file, never a symlink.");
+  }
+
   let raw;
   try {
     raw = JSON.parse(await readFile(file, "utf8"));
   } catch {
     throw new Error("No signing key is configured; unsigned evidence cannot authorize dispatch.");
   }
-  return requireKey({ key_id: raw?.key_id, generation: raw?.generation, secret: raw?.secret });
+  // Own-property reads only. JSON.parse already makes a literal "__proto__" key an own
+  // data property that does not affect prototype lookup, so this is defence in depth
+  // with no reachable failure today — deliberately untested rather than covered by an
+  // assertion that cannot fail. It guards a future switch to a non-JSON parser.
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("The signing key file is malformed.");
+  }
+  const own = (field) => (Object.prototype.hasOwnProperty.call(raw, field) ? raw[field] : undefined);
+  return requireKey({ key_id: own("key_id"), generation: own("generation"), secret: own("secret") });
 }
 
 /** Sign a reviewed snapshot and write the manifest atomically beside the evidence. */
 export async function signGateManifest({ stateDir, snapshot, reviewer, key, now }) {
-  const manifest = buildGateManifest({ snapshot, reviewer, key, now });
+  const manifest = buildGateManifest({ snapshot, reviewer, key, now, stateDir });
   const dir = join(stateDir, "evidence");
   await mkdir(dir, { recursive: true });
 

@@ -33,7 +33,7 @@ const MODES = ["disabled", "qualification", "candidate", "enabled"];
 // the same shape as the reader divergence that already caused one real bug.
 // ---------------------------------------------------------------------------
 
-export function authenticateGateEvidence(snapshot, signingKey, now = Date.now()) {
+export function authenticateGateEvidence(snapshot, signingKey, now = Date.now(), stateDir = null) {
   const isSignedManifest = typeof snapshot === "object" && snapshot !== null && !Array.isArray(snapshot)
     && snapshot.schema_version === GATE_MANIFEST_SCHEMA_VERSION;
   if (!isSignedManifest) {
@@ -42,7 +42,7 @@ export function authenticateGateEvidence(snapshot, signingKey, now = Date.now())
   if (!signingKey) {
     return { ok: false, reason: "No signing key is available to verify the gate manifest." };
   }
-  return verifyGateManifest(snapshot, signingKey, Number.isFinite(now) ? now : Date.now());
+  return verifyGateManifest(snapshot, signingKey, Number.isFinite(now) ? now : Date.now(), stateDir);
 }
 
 export function evaluatePromotion(snapshot, targetMode, now = Date.now()) {
@@ -461,7 +461,7 @@ async function main(argv) {
     process.exitCode = 1;
     return;
   }
-  const authenticated = authenticateGateEvidence(snapshot, signingKey, Date.now());
+  const authenticated = authenticateGateEvidence(snapshot, signingKey, Date.now(), stateDir);
   if (!authenticated.ok) {
     console.error("Mission Control promotion: NO-GO");
     console.error("- " + authenticated.reason);
