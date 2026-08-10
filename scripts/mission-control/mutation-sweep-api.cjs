@@ -27,8 +27,23 @@ const GUARDED_ROUTES = [
   ["opencode prompt", "src/app/api/opencode/sessions/[id]/prompt/route.ts"],
 ];
 
-const TARGETS = GUARDED_ROUTES.map(([label, file]) => [file, [
-  [`${label} requires local authority`, GUARD, "", VITEST, CONTRACT],
-]]);
+// The primitive every route above delegates to. It was unswept while being the only thing
+// standing between a visited web page and a local agent PTY.
+const ORIGIN_UNIT = ["src/server/mission-control/security/local-origin.test.ts"];
+const AUTHORITY_CHECK = "  if (hasForwardedAuthority || host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {";
+
+const TARGETS = [
+  ...GUARDED_ROUTES.map(([label, file]) => [file, [
+    [`${label} requires local authority`, GUARD, "", VITEST, CONTRACT],
+  ]]),
+  ["src/server/mission-control/security/local-origin.ts", [
+    // Which hosts may be spoken to at all.
+    ["host allowlist enforced", AUTHORITY_CHECK, "  if (hasForwardedAuthority || host === null || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
+    // The pairing rule. Both loopback names are accepted; neither may drive the other.
+    ["origin must name its own host", AUTHORITY_CHECK, "  if (hasForwardedAuthority || host === null || !MISSION_CONTROL_HOSTS.includes(host)) {", VITEST, ORIGIN_UNIT],
+    // Proxy headers are rejected, never interpreted - this service has no proxy.
+    ["forwarded authority rejected", AUTHORITY_CHECK, "  if (host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
+  ]],
+];
 
 process.exitCode = report(sweep(TARGETS)) > 0 ? 1 : 0;

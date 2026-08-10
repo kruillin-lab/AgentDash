@@ -55,21 +55,38 @@ describe("validateLocalMissionControlAuthority", () => {
     expect(validateLocalMissionControlAuthority(headers)).toEqual({ ok: false, code: "invalid_local_authority" });
   });
 
-  test("rejects alternate loopback and wildcard authorities", () => {
-    const rejectedHosts = ["localhost:3007", "[::1]:3007", "0.0.0.0:3007"];
+  test("rejects IPv6 loopback and wildcard authorities", () => {
+    const rejectedHosts = ["[::1]:3007", "0.0.0.0:3007"];
 
     for (const host of rejectedHosts) {
       expect(
-        validateLocalMissionControlAuthority(new Headers({ Host: host, Origin: "http://127.0.0.1:3007" })),
+        validateLocalMissionControlAuthority(new Headers({ Host: host, Origin: `http://${host}` })),
       ).toEqual({ ok: false, code: "invalid_local_authority" });
     }
   });
 
-  test("accepts only the exact local mutation authority", () => {
-    const result = validateLocalMissionControlAuthority(
-      new Headers({ Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007" }),
-    );
+  // Both loopback names are accepted, but only paired with themselves. A page served on
+  // one name driving the other is a genuinely cross-origin request that the browser would
+  // send without a preflight, so the mismatch has to stay fatal.
+  test("rejects a loopback Origin that does not name the Host it was sent to", () => {
+    const crossed = [
+      { Host: "localhost:3007", Origin: "http://127.0.0.1:3007" },
+      { Host: "127.0.0.1:3007", Origin: "http://localhost:3007" },
+    ];
 
-    expect(result).toEqual({ ok: true });
+    for (const headers of crossed) {
+      expect(validateLocalMissionControlAuthority(new Headers(headers))).toEqual({ ok: false, code: "invalid_local_authority" });
+    }
+  });
+
+  test("accepts either loopback name when the Origin names that same Host", () => {
+    const accepted = [
+      { Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007" },
+      { Host: "localhost:3007", Origin: "http://localhost:3007" },
+    ];
+
+    for (const headers of accepted) {
+      expect(validateLocalMissionControlAuthority(new Headers(headers))).toEqual({ ok: true });
+    }
   });
 });
