@@ -173,3 +173,22 @@ its own manifest.
 - The fault harness (`node scripts/mission-control/fault-harness.mjs`) injects
   response loss and restart at every command boundary and must report GO before
   any promotion.
+
+## Verification gates
+
+Run all of these before a promotion. Each mutation sweep deletes or weakens one
+guard at a time and requires a test to fail; a sweep is only worth its green count
+if you also know what it does NOT cover, so the scopes are listed explicitly.
+
+| Gate | Scope |
+| --- | --- |
+| `npm run test:unit` | Whole suite. |
+| `node scripts/mission-control/mutation-sweep.cjs` | `promote-gates.mjs` evidence and promotion rules. |
+| `node scripts/mission-control/mutation-sweep-signing.cjs` | Gate-manifest signing authority. |
+| `node scripts/mission-control/mutation-sweep-runtime.cjs` | Runtime dispatch authority: `runtime/composition.ts`, `runtime/dispatch-mode.ts`, `instrumentation.ts`. |
+| `node scripts/mission-control/mutation-sweep-hermes.cjs` | The command boundary, `server/hermes/command.ts`: executable allowlist, argument bounds, environment policy, output redaction, detached-launch validation, process-tree termination. |
+| `node --test scripts/mission-control/__tests__/mutation-runner.test.mjs` | The harness itself — that a mutation was really applied, and that "caught" means a test failed rather than the runner crashing. |
+| `node scripts/mission-control/fault-harness.mjs` | Response loss and restart at every command boundary. |
+
+A sweep reporting UNCAUGHT is a guard no test protects. Fix it by adding the test,
+never by deleting the mutation entry.

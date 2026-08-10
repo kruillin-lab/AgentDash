@@ -526,6 +526,83 @@ describe("runCommand", () => {
     expect(result.stderr).toContain("[REDACTED]");
     expect(result.stderr).not.toContain(secret);
   });
+
+  // Production break caught: redactValues carries live capability tokens - controller-admin.ts
+  // and kanban-adapter.ts both pass real ones - and only the credential-SHAPE pass was tested.
+  // A capability token that looks like nothing in particular matches no shape, so deleting the
+  // caller-supplied redaction loop leaked it verbatim to an API consumer with every test green.
+  test("redacts caller-supplied secrets that match no credential shape", async () => {
+    const token = "plain-capability-value-shaped-like-nothing";
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `process.stdout.write(${JSON.stringify(token)}); process.stderr.write(${JSON.stringify(token)})`],
+      env: {},
+      redactValues: [token],
+    });
+
+    expect(result.stdout).toBe("[REDACTED]");
+    expect(result.stderr).toBe("[REDACTED]");
+  });
+
+  // Production break caught: only stderr redaction was asserted, so the stdout call could be
+  // dropped entirely and a secret would come back through the other stream untouched.
+  test("redacts credential shapes on stdout, not only stderr", async () => {
+    const secret = "sk-live_abcdefghijklmnopqrstuvwxyz";
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `process.stdout.write(${JSON.stringify(secret)})`],
+      env: {},
+    });
+
+    expect(result.stdout).toContain("[REDACTED]");
+    expect(result.stdout).not.toContain(secret);
+  });
+
+  // Production break caught: an unbounded argv is an unbounded command line. Nothing asserted
+  // the count, size, or NUL bounds, so all three could be deleted with the suite still green.
+  test("rejects an argument list past the validated count bound", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: Array.from({ length: 129 }, () => "-e"),
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  test("rejects an argument past the validated size bound", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "0", "x".repeat(64 * 1024 + 1)],
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  // A NUL truncates the argument at the OS boundary, so anything after it is invisible to the
+  // policy that just approved the whole string.
+  test("rejects an argument carrying a NUL byte", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write('ok')\0 trailing"],
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  // Production break caught: forbidden keys threw, but malformed ones were silently dropped by an
+  // untested check. Without it a key that is not an identifier reaches the child's environment.
+  test("drops child environment keys that are not plain identifiers", async () => {
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write(Object.keys(process.env).filter((key) => key.includes('AGENTDASH')).sort().join(','))"],
+      env: { AGENTDASH_KEPT: "1", "AGENTDASH-DROPPED": "1", "9AGENTDASH": "1" },
+    });
+
+    expect(result.stdout).toBe("AGENTDASH_KEPT");
+  });
 });
 
 describe("launchDetachedCommand", () => {
@@ -545,5 +622,21 @@ describe("launchDetachedCommand", () => {
     await expect.poll(async () => {
       try { return await readFile(sentinel, "utf8"); } catch { return null; }
     }, { timeout: 2_000 }).toBe("started");
+  });
+
+  // Production break caught: the detached launcher is a second door to the same OS process, used
+  // by cli.ts. Only its happy path was tested, so dropping its validate() call left the allowlist,
+  // the script-extension rule and the argument bounds unenforced on that path alone.
+  test("applies the same executable policy on the detached path", async () => {
+    const other = join(await temporaryDirectory(), "not-the-node-binary.exe");
+    let rejection: unknown;
+
+    try {
+      launchDetachedCommand({ executable, allowedExecutables: [other], args: [], env: {} });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toMatchObject({ code: "executable_not_allowed" });
   });
 });

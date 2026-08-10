@@ -146,9 +146,12 @@ that loses this coin flip surfaces as `termination_unconfirmed` to the operator.
 from both facts afterwards. The fail-closed intent is untouched and now pinned: a parent
 that closed with no attempt ever confirming a signal still rejects, in `stop()`.
 
-Both halves are mutation-pinned in `scripts/mission-control/mutation-sweep-runtime.cjs`
+Both halves are mutation-pinned in `scripts/mission-control/mutation-sweep-hermes.cjs`
 (`win32 close does not cancel retries`, `unconfirmed win32 close fails closed`) —
-restoring either short-circuit fails a test.
+restoring either short-circuit fails a test. That sweep was added because this file was
+the last unswept boundary in the product: nothing else turns an authorized decision into
+a real OS process, and none of its controls — allowlist, argument bounds, environment
+policy, output redaction, detached-launch validation — had ever been mutation-tested.
 
 Separately, the three tree tests now give the grandchild a 5 s fuse instead of 800 ms.
 The assertion is unchanged — the grandchild must never get to act — but it no longer
