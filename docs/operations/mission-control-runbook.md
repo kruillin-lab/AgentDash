@@ -193,3 +193,21 @@ if you also know what it does NOT cover, so the scopes are listed explicitly.
 
 A sweep reporting UNCAUGHT is a guard no test protects. Fix it by adding the test,
 never by deleting the mutation entry.
+
+### The authority guard also needs a live probe
+
+Unit tests build `Headers` directly, so they never see what Next does to a real request.
+Next assigns `x-forwarded-host/-proto/-port/-for` on every request, synthesized from the
+`Host` header itself. A guard that rejected their presence therefore passed every unit test
+and returned 403 to every real request — the CEO approval path included. Before a
+promotion, probe a running server, not just the suite:
+
+```bash
+npm run build && npm run start
+# reaches the handler (400 = bad action, guard passed)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3007/api/hermes/claw \
+  -H 'Origin: http://127.0.0.1:3007' -H 'Content-Type: application/json' -d '{"action":"x"}'
+# blocked (403)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3007/api/hermes/claw \
+  -H 'Origin: http://evil.example' -H 'Content-Type: application/json' -d '{"action":"x"}'
+```

@@ -30,7 +30,9 @@ const GUARDED_ROUTES = [
 // The primitive every route above delegates to. It was unswept while being the only thing
 // standing between a visited web page and a local agent PTY.
 const ORIGIN_UNIT = ["src/server/mission-control/security/local-origin.test.ts"];
-const AUTHORITY_CHECK = "  if (hasForwardedAuthority || host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {";
+const AUTHORITY_CHECK = "  if (hasSuppliedForwarding || host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {";
+const FORWARDED_HOST_CLAUSE = "    || (forwardedHost !== null && forwardedHost !== host)";
+const FORWARDED_PROTO_CLAUSE = '    || (forwardedProto !== null && forwardedProto !== "http")';
 
 const TARGETS = [
   ...GUARDED_ROUTES.map(([label, file]) => [file, [
@@ -38,11 +40,14 @@ const TARGETS = [
   ]]),
   ["src/server/mission-control/security/local-origin.ts", [
     // Which hosts may be spoken to at all.
-    ["host allowlist enforced", AUTHORITY_CHECK, "  if (hasForwardedAuthority || host === null || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
+    ["host allowlist enforced", AUTHORITY_CHECK, "  if (hasSuppliedForwarding || host === null || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
     // The pairing rule. Both loopback names are accepted; neither may drive the other.
-    ["origin must name its own host", AUTHORITY_CHECK, "  if (hasForwardedAuthority || host === null || !MISSION_CONTROL_HOSTS.includes(host)) {", VITEST, ORIGIN_UNIT],
-    // Proxy headers are rejected, never interpreted - this service has no proxy.
-    ["forwarded authority rejected", AUTHORITY_CHECK, "  if (host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
+    ["origin must name its own host", AUTHORITY_CHECK, "  if (hasSuppliedForwarding || host === null || !MISSION_CONTROL_HOSTS.includes(host)) {", VITEST, ORIGIN_UNIT],
+    // Caller-supplied forwarding is rejected. Not by presence - Next synthesizes these on
+    // every request - but by disagreeing with what Next would have synthesized.
+    ["supplied forwarding rejected", AUTHORITY_CHECK, "  if (host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {", VITEST, ORIGIN_UNIT],
+    ["forwarded host must match host", FORWARDED_HOST_CLAUSE, "", VITEST, ORIGIN_UNIT],
+    ["forwarded proto must be http", FORWARDED_PROTO_CLAUSE, "", VITEST, ORIGIN_UNIT],
   ]],
 ];
 

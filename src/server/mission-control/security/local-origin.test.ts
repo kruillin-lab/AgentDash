@@ -79,6 +79,41 @@ describe("validateLocalMissionControlAuthority", () => {
     }
   });
 
+  // The shape EVERY real request has. Next assigns x-forwarded-host/-proto/-port/-for on
+  // every request, synthesized from the Host header itself, so a guard that rejects their
+  // presence rejects every request that ever reaches a real server. That is what shipped,
+  // and no unit test caught it because these tests build Headers directly and never travel
+  // through the Next server. Measured against next 14.2.35, base-server.js.
+  test("accepts the x-forwarded-* values Next synthesizes for a direct connection", () => {
+    const headers = new Headers({
+      Host: "127.0.0.1:3007",
+      Origin: "http://127.0.0.1:3007",
+      "X-Forwarded-Host": "127.0.0.1:3007",
+      "X-Forwarded-Port": "3007",
+      "X-Forwarded-Proto": "http",
+      "X-Forwarded-For": "127.0.0.1",
+    });
+
+    expect(validateLocalMissionControlAuthority(headers)).toEqual({ ok: true });
+  });
+
+  // Next assigns those with `??=`, so a caller-supplied value survives rather than being
+  // overwritten. Presence is meaningless; disagreeing with what Next would have synthesized
+  // is what identifies a value as supplied.
+  test("rejects forwarded values a caller supplied instead", () => {
+    const base = { Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007" };
+    const rejected = [
+      { ...base, "X-Forwarded-Host": "attacker.example" },
+      { ...base, "X-Forwarded-Proto": "https" },
+      { ...base, "X-Forwarded-Origin": "http://attacker.example" },
+      { ...base, Forwarded: "host=attacker.example" },
+    ];
+
+    for (const headers of rejected) {
+      expect(validateLocalMissionControlAuthority(new Headers(headers))).toEqual({ ok: false, code: "invalid_local_authority" });
+    }
+  });
+
   test("accepts either loopback name when the Origin names that same Host", () => {
     const accepted = [
       { Host: "127.0.0.1:3007", Origin: "http://127.0.0.1:3007" },

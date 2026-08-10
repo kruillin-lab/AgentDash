@@ -23,11 +23,23 @@ export type LocalAuthorityResult = { ok: true } | { ok: false; code: "invalid_lo
 export function validateLocalMissionControlAuthority(headers: Headers): LocalAuthorityResult {
   const host = headers.get("host");
   const origin = headers.get("origin");
-  const hasForwardedAuthority = ["forwarded", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-origin"].some(
-    (header) => headers.has(header),
-  );
+  const forwardedHost = headers.get("x-forwarded-host");
+  const forwardedProto = headers.get("x-forwarded-proto");
+  // Next synthesizes x-forwarded-host/-proto/-port/-for on EVERY request
+  // (next/dist/server/base-server.js: `req.headers["x-forwarded-host"] ??= req.headers["host"]`),
+  // so their presence proves nothing and rejecting on presence alone rejects every real
+  // request. It assigns with `??=`, which means a client-supplied value survives instead of
+  // being overwritten - so the question is whether each value is exactly what Next would
+  // have synthesized for a direct connection. Anything else came from the caller.
+  //
+  // x-forwarded-for and x-forwarded-port are deliberately not checked: no decision here
+  // consults them, and their synthesized values vary with the socket family.
+  const hasSuppliedForwarding = headers.has("forwarded")
+    || headers.has("x-forwarded-origin")
+    || (forwardedHost !== null && forwardedHost !== host)
+    || (forwardedProto !== null && forwardedProto !== "http");
 
-  if (hasForwardedAuthority || host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {
+  if (hasSuppliedForwarding || host === null || !MISSION_CONTROL_HOSTS.includes(host) || origin !== `http://${host}`) {
     return { ok: false, code: "invalid_local_authority" };
   }
 
