@@ -2,6 +2,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 import { NextResponse } from "next/server"
+import { validateLocalMissionControlAuthority } from "@/server/mission-control/security/local-origin"
 import { getOutput, kill, resize, writeInput, interrupt } from "@/server/hermes/pty"
 
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
@@ -14,6 +15,8 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
 
 // POST /api/hermes/pty/:id  { action: "input" | "interrupt" | "kill" | "resize", data?: string, cols?: number, rows?: number }
 export async function POST(req: Request, { params }: { params: { id: string } }) {
+  const authority = validateLocalMissionControlAuthority(req.headers)
+  if (!authority.ok) return NextResponse.json({ error: { code: authority.code, message: "Local Mission Control authority is required." } }, { status: 403 })
   const id = Number(params.id)
   if (!Number.isFinite(id)) return NextResponse.json({ error: { code: "BAD_ID" } }, { status: 400 })
   let body: { action?: string; data?: string; cols?: number; rows?: number }

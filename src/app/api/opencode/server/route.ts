@@ -2,6 +2,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 import { NextResponse } from "next/server"
+import { validateLocalMissionControlAuthority } from "@/server/mission-control/security/local-origin"
 import { ensureServer, getStatusWithProbe, startServer, stopServer, type ServerStatus } from "@/server/opencode/server-manager"
 
 export async function GET(): Promise<Response> {
@@ -11,6 +12,8 @@ export async function GET(): Promise<Response> {
 
 // POST /api/opencode/server { action: "ensure" | "start" | "stop" }
 export async function POST(req: Request): Promise<Response> {
+  const authority = validateLocalMissionControlAuthority(req.headers)
+  if (!authority.ok) return NextResponse.json({ error: { code: authority.code, message: "Local Mission Control authority is required." } }, { status: 403 })
   let body: { action?: string }
   try {
     body = await req.json()

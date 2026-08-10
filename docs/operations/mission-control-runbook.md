@@ -187,6 +187,7 @@ if you also know what it does NOT cover, so the scopes are listed explicitly.
 | `node scripts/mission-control/mutation-sweep-signing.cjs` | Gate-manifest signing authority. |
 | `node scripts/mission-control/mutation-sweep-runtime.cjs` | Runtime dispatch authority: `runtime/composition.ts`, `runtime/dispatch-mode.ts`, `instrumentation.ts`. |
 | `node scripts/mission-control/mutation-sweep-hermes.cjs` | The command boundary, `server/hermes/command.ts`: executable allowlist, argument bounds, environment policy, output redaction, detached-launch validation, process-tree termination. |
+| `node scripts/mission-control/mutation-sweep-api.cjs` | The local-authority guard on every state-changing API route. This is the only defence against browser CSRF: any page the user visits can POST to 127.0.0.1 without a preflight, and the side effect lands whether or not the attacker can read the response. |
 | `node --test scripts/mission-control/__tests__/mutation-runner.test.mjs` | The harness itself — that a mutation was really applied, and that "caught" means a test failed rather than the runner crashing. |
 | `node scripts/mission-control/fault-harness.mjs` | Response loss and restart at every command boundary. |
 
