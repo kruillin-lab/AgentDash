@@ -1,4 +1,15 @@
 node_modules/
-daemon/
-*.log
+.next/
+out/
+dist/
 .env
+.env.local
+*.log
+.quality-gate/logs/
+.quality-gate/runs/
+.quality-gate/reports/
+legacy/node_modules/
+legacy/dist/
+legacy/daemon/
+*.tsbuildinfo
+.agentdash-state/

@@ -1,0 +1,200 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", "Consolas", monospace;
+}
+
+html, body {
+  background: #04060d;
+  color: #e6ecff;
+  min-height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Aurora background — fixed, behind everything. */
+.aurora-root {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 600px at 12% -10%, rgba(34, 227, 255, 0.18), transparent 60%),
+    radial-gradient(900px 600px at 88% 8%, rgba(255, 68, 216, 0.14), transparent 60%),
+    radial-gradient(1200px 800px at 50% 120%, rgba(167, 139, 250, 0.16), transparent 60%),
+    #04060d;
+}
+.aurora-root::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background: radial-gradient(closest-side, rgba(34, 227, 255, 0.22), transparent 70%) 0/40% 40% no-repeat,
+    radial-gradient(closest-side, rgba(255, 68, 216, 0.20), transparent 70%) 30% 20%/45% 45% no-repeat,
+    radial-gradient(closest-side, rgba(167, 139, 250, 0.20), transparent 70%) 70% 40%/50% 50% no-repeat;
+  filter: blur(70px);
+  animation: auroraShift 22s ease-in-out infinite;
+  opacity: 0.65;
+}
+.aurora-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(rgba(120, 160, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 160, 255, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at 50% 30%, black, transparent 80%);
+  -webkit-mask-image: radial-gradient(circle at 50% 30%, black, transparent 80%);
+}
+
+@keyframes auroraShift {
+  0%, 100% { transform: translate3d(-4%, -3%, 0) scale(1.05); }
+  50% { transform: translate3d(5%, 4%, 0) scale(1.18); }
+}
+
+/* Glass panel base. */
+.glass {
+  background: rgba(11, 16, 34, 0.55);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid rgba(120, 160, 255, 0.14);
+  box-shadow: 0 8px 32px -6px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.glass-strong {
+  background: rgba(11, 16, 34, 0.78);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(120, 160, 255, 0.18);
+}
+.glass-hover {
+  transition: border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+}
+.glass-hover:hover {
+  border-color: rgba(34, 227, 255, 0.4);
+  box-shadow: 0 0 0 1px rgba(34, 227, 255, 0.25), 0 16px 50px -10px rgba(34, 227, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+/* Neon text gradient. */
+.neon-text {
+  background: linear-gradient(90deg, #22e3ff 0%, #a78bfa 45%, #ff44d8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Scrollbar styling. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 160, 255, 0.25) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 160, 255, 0.22);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(34, 227, 255, 0.4); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* Shimmer skeleton. */
+.shimmer {
+  background: linear-gradient(90deg, rgba(120,160,255,0.05) 25%, rgba(120,160,255,0.16) 37%, rgba(120,160,255,0.05) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.8s linear infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Status dot pulse. */
+.status-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+}
+.status-dot::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 9999px;
+  background: inherit;
+  opacity: 0.35;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 0.35; }
+  50% { transform: scale(1.7); opacity: 0; }
+}
+
+/* Terminal output area. */
+.term-area {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(4, 6, 13, 0.78);
+  border: 1px solid rgba(120, 160, 255, 0.12);
+  border-radius: 14px;
+  padding: 14px 16px;
+}
+
+/* Focus ring. */
+.focus-ring:focus-visible {
+  outline: 2px solid rgba(34, 227, 255, 0.7);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* Modernized chat-app polish. */
+.bg-glass {
+  background: rgba(11, 16, 34, 0.55);
+}
+.bg-glass-strong {
+  background: rgba(11, 16, 34, 0.82);
+}
+
+/* Soft drop shadow for elevated bubbles/cards. */
+.elev-1 { box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 28px -10px rgba(0,0,0,0.6); }
+.elev-2 { box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 16px 40px -12px rgba(0,0,0,0.7); }
+
+/* Conversation day-divider. */
+.day-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 4px 8px;
+  color: rgba(255,255,255,0.35);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.day-divider::before, .day-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(120,160,255,0.18), transparent);
+}
+
+/* Subtle hover lift for clickable cards. */
+.hover-lift { transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease; }
+.hover-lift:hover { transform: translateY(-1px); border-color: rgba(120,160,255,0.32); box-shadow: 0 16px 40px -14px rgba(34,227,255,0.18); }
+
+/* Sidebar nav item active accent bar. */
+.nav-active-bar {
+  position: absolute;
+  inset: 0 auto 0 -8px;
+  width: 3px;
+  border-radius: 9999px;
+}

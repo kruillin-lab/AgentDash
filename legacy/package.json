@@ -1,0 +1,52 @@
+{
+  "name": "agentdash",
+  "version": "1.0.0",
+  "description": "Local AgentOS dashboard and interactive agent session launcher",
+  "main": "electron.js",
+  "scripts": {
+    "start": "node server.js",
+    "app": ".\\node_modules\\.bin\\electron.cmd .",
+    "build": "electron-builder --win --x64",
+    "check": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$files = Get-ChildItem -Recurse -File -Include *.js | Where-Object { $_.FullName -notmatch '\\\\node_modules\\\\|\\\\dist\\\\|\\\\.goalbuddy-board\\\\' }; foreach ($file in $files) { node --check $file.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }\"",
+    "test": "node --test test/*.test.js"
+  },
+  "build": {
+    "appId": "com.agentdash.app",
+    "productName": "AgentDash",
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron.js",
+      "server.js",
+      "lib/**",
+      "public/**",
+      "node_modules/**",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "js-yaml": "^4.2.0",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
+  }
+}

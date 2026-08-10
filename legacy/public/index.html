@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentOS</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">AgentOS</div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="projects">
+        <span class="nav-icon">◇</span>Projects
+      </button>
+      <button class="nav-item" data-view="goals">
+        <span class="nav-icon">◎</span>Goals
+      </button>
+      <button class="nav-item" data-view="schedules">
+        <span class="nav-icon">◷</span>Schedules
+      </button>
+      <button class="nav-item" data-view="recall">
+        <span class="nav-icon">⌕</span>Recall
+      </button>
+      <button class="nav-item" data-view="inbox">
+        <span class="nav-icon">▱</span>Inbox
+      </button>
+      <button class="nav-item" data-view="dashboard">
+        <span class="nav-icon">▦</span>Dashboard
+      </button>
+      <button class="nav-item" data-view="sessions">
+        <span class="nav-icon">◫</span>Sessions
+      </button>
+      <button class="nav-item" data-view="activity">
+        <span class="nav-icon">≡</span>Activity
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn btn-launch" id="open-launch">+ New Session</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="view-title">Projects</h1>
+      <div class="topbar-meta" id="topbar-meta"></div>
+    </header>
+
+    <section id="view-projects" class="view visible">
+      <div id="projects-header"></div>
+      <div id="projects-grid" class="card-grid"></div>
+    </section>
+
+    <section id="view-goals" class="view">
+      <div id="goals-summary"></div>
+      <div id="goals-grid" class="card-grid"></div>
+    </section>
+
+    <section id="view-schedules" class="view">
+      <div id="schedules-summary"></div>
+      <div class="card">
+        <div id="schedules-table" class="schedules-table"></div>
+      </div>
+    </section>
+
+    <section id="view-recall" class="view">
+      <div class="card recall-search-card">
+        <form id="recall-form" class="recall-form">
+          <label for="recall-query">Search durable project context</label>
+          <div class="recall-controls">
+            <input id="recall-query" type="search" maxlength="200" placeholder="e.g. AgentDash quality gate" autocomplete="off">
+            <button class="btn btn-launch" type="submit">Search</button>
+          </div>
+        </form>
+      </div>
+      <div id="recall-summary"></div>
+      <div id="recall-results" class="recall-results"></div>
+    </section>
+
+    <section id="view-inbox" class="view">
+      <div id="inbox-summary"></div>
+      <div id="inbox-content" class="inbox-content"></div>
+    </section>
+
+    <section id="view-dashboard" class="view">
+      <div class="cards">
+        <div class="card stat">
+          <div class="stat-label">Active Sessions</div>
+          <div class="stat-value" id="stat-active">0</div>
+        </div>
+        <div class="card stat">
+          <div class="stat-label">Total Sessions</div>
+          <div class="stat-value" id="stat-total">0</div>
+        </div>
+        <div class="card stat">
+          <div class="stat-label">Activity (24h)</div>
+          <div class="stat-value" id="stat-activity">0</div>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <div class="card-header">
+            <h2>Active Sessions</h2>
+          </div>
+          <div class="session-list" id="active-sessions"></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h2>Recent Activity</h2>
+          </div>
+          <div class="activity-list" id="dashboard-activity"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-sessions" class="view">
+      <div class="card">
+        <div class="card-header">
+          <h2>All Sessions</h2>
+        </div>
+        <div class="session-table" id="all-sessions"></div>
+      </div>
+    </section>
+
+    <section id="view-activity" class="view">
+      <div class="card">
+        <div class="card-header">
+          <h2>Activity Feed</h2>
+        </div>
+        <div class="activity-list big" id="full-activity"></div>
+      </div>
+    </section>
+
+    <section id="view-detail" class="view">
+      <div class="card">
+        <div class="card-header">
+          <button class="btn btn-ghost" id="back-btn">← Back</button>
+          <h2 id="detail-title">Session</h2>
+          <div class="detail-actions">
+            <button class="btn btn-interrupt" id="interrupt-detail" hidden>Interrupt</button>
+            <button class="btn btn-danger" id="kill-detail" hidden>Kill</button>
+            <button class="btn" id="resume-detail" hidden>Resume</button>
+            <span class="resume-unsupported" id="resume-unsupported" hidden>Resume unsupported</span>
+          </div>
+        </div>
+        <div class="detail-meta" id="detail-meta"></div>
+        <div class="prompt-delivery" id="prompt-delivery" hidden>
+          <span id="prompt-delivery-text"></span>
+          <div class="prompt-delivery-actions">
+            <button class="btn" id="send-prompt-now">Send now</button>
+            <button class="btn btn-ghost" id="cancel-prompt-delivery">Cancel</button>
+          </div>
+        </div>
+        <div class="detail-output" id="terminal-container"></div>
+        <form class="detail-input" id="detail-input-form" style="display: none;">
+          <input type="text" id="detail-input" placeholder="Type here and press Enter...">
+          <button class="btn">Send</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal" id="launch-modal">
+  <div class="modal-content">
+    <h2>Launch Agent</h2>
+    <label>Agent
+      <select id="agent-select"></select>
+    </label>
+    <label>Working Directory (optional)
+      <input type="text" id="cwd-input" list="cwd-history" placeholder="C:\path\to\project" autocomplete="off">
+      <datalist id="cwd-history"></datalist>
+    </label>
+    <label>Initial Prompt (optional)
+      <textarea id="prompt-input" maxlength="4000" rows="4" placeholder="Visible and editable before launch"></textarea>
+    </label>
+    <label class="check-label">
+      <input type="checkbox" id="auto-prompt" checked>
+      <span>Send once when the agent is ready</span>
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancel-launch">Cancel</button>
+      <button class="btn btn-launch" id="confirm-launch">Launch</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="goal-modal">
+  <div class="modal-content goal-modal-content">
+    <div class="modal-heading">
+      <div>
+        <div class="eyebrow" id="goal-modal-project"></div>
+        <h2 id="goal-modal-title">Goal</h2>
+      </div>
+      <button class="btn btn-ghost" id="close-goal-modal">Close</button>
+    </div>
+    <div id="goal-modal-meta" class="goal-modal-meta"></div>
+    <div id="goal-modal-tasks" class="task-table"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

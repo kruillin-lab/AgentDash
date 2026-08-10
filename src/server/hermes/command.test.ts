@@ -1,0 +1,642 @@
+import { EventEmitter } from "node:events";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+
+import { afterEach, describe, expect, test, vi } from "vitest";
+
+import { CommandTerminationError, createCommandRunner, launchDetachedCommand, runCommand } from "./command";
+
+const executable = process.execPath;
+const allowedExecutables = [executable];
+const temporaryDirectories: string[] = [];
+
+// Measured on a loaded Windows box, five clean trials: taskkill.exe costs 0.84-1.44s of process
+// creation, while the parent it kills dies in ~4ms. The three tree tests below used an 800ms
+// grandchild fuse, so the grandchild beat the terminator to its own sentinel and the tests raced
+// the mechanism instead of asserting the guarantee. The assertion is unchanged - the grandchild
+// must never get to act - only its fuse now clears the measured cost of killing it. Termination
+// itself stays bounded by DEFAULT_TERMINATION_GRACE_MS, which this stays well inside.
+const GRANDCHILD_FUSE_MS = 5_000;
+const TREE_TERMINATION_TIMEOUT_MS = 30_000;
+
+function afterGrandchildFuse(): Promise<void> {
+  return new Promise<void>((resolveWait) => setTimeout(resolveWait, GRANDCHILD_FUSE_MS + 500));
+}
+
+async function temporaryDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "agentdash-command-test-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })));
+});
+
+describe("runCommand", () => {
+  // Production break caught: timeout/abort/output stops used to resolve immediately after sending
+  // a direct-child signal, before either process-tree termination or the child's close event.
+  test("does not resolve a stopped command until termination is confirmed and close is observed", async () => {
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      stdin: PassThrough;
+    };
+    child.pid = 4242;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    const terminateTree = vi.fn().mockResolvedValue(undefined);
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 1_000,
+      terminationForceMs: 1_000,
+    });
+    const controller = new AbortController();
+    let settled = false;
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    void pending.finally(() => { settled = true; });
+    controller.abort();
+    await vi.waitFor(() => expect(terminateTree).toHaveBeenCalled());
+
+    expect(settled).toBe(false);
+    child.emit("close", null, null);
+    await expect(pending).resolves.toMatchObject({ aborted: true });
+  });
+
+  // Production break caught: on POSIX, the direct child can close after SIGTERM while a
+  // resistant descendant keeps the detached process group alive.
+  test("does not let POSIX direct-child close substitute for process-group extinction", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4250, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    let groupAlive = true;
+    const terminateTree = vi.fn(async (_target: unknown, force: boolean) => {
+      if (force) groupAlive = false;
+      else queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      probeTree: vi.fn(async () => groupAlive),
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 100,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGTERM" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
+  test("treats a POSIX EPERM group probe as still alive and fails closed after SIGKILL", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4251, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === 0) throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+      return true;
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+    child.emit("close", null, "SIGTERM");
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(true);
+  });
+
+  test("fails closed when a POSIX process-group probe returns an unexpected error", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4252, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === 0) throw Object.assign(new Error("probe failed"), { code: "EIO" });
+      return true;
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(true);
+  });
+
+  test("uses the spawn-time POSIX group id when signal and probe race with ESRCH", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4253, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const killProcess = vi.fn((_pid: number, signal?: NodeJS.Signals | 0) => {
+      if (signal === "SIGTERM") queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+      throw Object.assign(new Error("group is already gone"), { code: "ESRCH" });
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      killProcess,
+      platform: "linux",
+      terminationGraceMs: 100,
+      terminationForceMs: 100,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    child.pid = 9_999;
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGTERM" });
+    expect(killProcess.mock.calls.map((call) => call[0])).toEqual([-4253, -4253]);
+    expect(killProcess.mock.calls.some((call) => call[1] === "SIGKILL")).toBe(false);
+  });
+
+  // Production break caught: a graceful tree-stop acknowledgement without child close could be
+  // mistaken for completion instead of escalating to a bounded forced tree termination.
+  test("escalates once when graceful tree termination does not produce close", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4243, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn(async (_child: unknown, force: boolean) => {
+      if (force) queueMicrotask(() => child.emit("close", null, "SIGKILL"));
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 5,
+      terminationForceMs: 100,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
+  // Production break caught: taskkill can transiently miss a just-spawned Windows PID/tree;
+  // retrying immediately preserved the race and rejected an otherwise bounded stop.
+  test("retries transient process-tree termination failures with bounded backoff", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4245, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn()
+      .mockRejectedValueOnce(new Error("PID tree is not registered yet"))
+      .mockImplementationOnce(async () => { queueMicrotask(() => child.emit("close", null, "SIGKILL")); });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 100,
+      terminationForceMs: 100,
+      terminationAttempts: 2,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, false]);
+  });
+
+  // Production break caught: taskkill costs ~1s while the parent it kills dies in ~4ms, so the
+  // parent's close and the terminator's own exit land in either order, flipping run to run. The
+  // retry loop used to abort the moment a close appeared, so whenever the parent won that coin
+  // flip a kill that had actually worked was reported as termination_unconfirmed - which the
+  // cancellation rules terminalize as inconsistent.
+  test("does not let a win32 parent close cancel a termination retry that then confirms", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4246, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn()
+      // The pass reaps the tree and the parent closes, then taskkill reports a partial failure
+      // because one member exited on its own between the enumeration and the kill.
+      .mockImplementationOnce(async () => {
+        child.emit("close", null, "SIGKILL");
+        throw new Error("one tree member was already gone");
+      })
+      .mockResolvedValueOnce(undefined);
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      platform: "win32",
+      terminationGraceMs: 1_000,
+      terminationForceMs: 1_000,
+      terminationAttempts: 2,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toMatchObject({ aborted: true, signal: "SIGKILL" });
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, false]);
+  });
+
+  // The guard the ordering fix must not weaken: a parent that vanished while no attempt ever
+  // confirmed a signal leaves the tree unreachable through that pid, so a later forced pass
+  // reporting success proves nothing about grandchildren it can no longer name.
+  test("still fails closed when a win32 parent closes with no confirmed termination", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4247, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn(async (_target: unknown, force: boolean) => {
+      if (force) return;
+      child.emit("close", null, null);
+      throw new Error("the tree could not be reached");
+    });
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      platform: "win32",
+      terminationGraceMs: 50,
+      terminationForceMs: 50,
+      terminationAttempts: 1,
+      terminationRetryMs: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false]);
+  });
+
+  // Production break caught: swallowed kill failures previously returned a successful-looking
+  // stopped result even though the process tree could still be using the disposable directory.
+  test("rejects with a fixed error when both process-tree termination attempts fail", async () => {
+    const child = new EventEmitter() as EventEmitter & { pid: number; stdout: PassThrough; stderr: PassThrough; stdin: PassThrough };
+    Object.assign(child, { pid: 4244, stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough() });
+    const terminateTree = vi.fn().mockRejectedValue(new Error("kill failed: sensitive detail"));
+    const runner = createCommandRunner({
+      spawnProcess: vi.fn(() => child as never),
+      terminateTree,
+      terminationGraceMs: 5,
+      terminationForceMs: 5,
+      terminationAttempts: 1,
+    });
+    const controller = new AbortController();
+
+    const pending = runner({ executable, allowedExecutables, args: [], env: {}, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).rejects.toEqual(new CommandTerminationError());
+    expect(terminateTree.mock.calls.map((call) => call[1])).toEqual([false, true]);
+  });
+
+  // Production break caught: a PATH-relative binary could select an attacker-controlled executable.
+  test("rejects relative executable paths", async () => {
+    await expect(runCommand({ executable: "node", allowedExecutables: ["node"], args: [], env: {} }))
+      .rejects.toMatchObject({ code: "invalid_executable" });
+  });
+
+  // Production break caught: Windows command wrappers could reintroduce implicit shell execution.
+  test.each(["hermes.cmd", "hermes.bat"])("rejects the %s executable extension", async (name) => {
+    const path = join(await temporaryDirectory(), name);
+    await writeFile(path, "exit /b 0", "utf8");
+
+    await expect(runCommand({ executable: path, allowedExecutables: [path], args: [], env: {} }))
+      .rejects.toMatchObject({ code: "invalid_executable" });
+  });
+
+  // Production break caught: an absolute binary outside policy could execute merely because a caller supplied it.
+  test("rejects an executable outside the explicit allowlist", async () => {
+    await expect(runCommand({ executable, allowedExecutables: [join(await temporaryDirectory(), "other.exe")], args: [], env: {} }))
+      .rejects.toMatchObject({ code: "executable_not_allowed" });
+  });
+
+  // Production break caught: CEO punctuation could be interpreted as shell grammar instead of one literal argument.
+  test("passes shell metacharacters literally without creating their requested side effect", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "injected.txt");
+    const punctuation = `hello & echo injected > ${sentinel} | (whoami); \`ignored\``;
+
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write(process.argv[1])", punctuation],
+      env: {},
+    });
+
+    expect(result).toMatchObject({ code: 0, stdout: punctuation, timedOut: false, aborted: false });
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  // Production break caught: a wedged Hermes process could outlive its bounded turn deadline.
+  test("terminates a command at its timeout", async () => {
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "setInterval(() => {}, 1_000)"],
+      env: {},
+      timeoutMs: 25,
+    });
+
+    expect(result).toMatchObject({ code: null, timedOut: true, aborted: false });
+  });
+
+  // Production break caught: killing only the direct Hermes child could let a delegated grandchild
+  // survive the timeout and mutate state after the command promise had already resolved.
+  test("confirms the complete process tree is gone before a timeout resolves", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "grandchild-survived.txt");
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      timeoutMs: 750,
+    });
+
+    expect(result.timedOut).toBe(true);
+    await afterGrandchildFuse();
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  }, TREE_TERMINATION_TIMEOUT_MS);
+
+  test("confirms the complete process tree is gone before abort resolution", async () => {
+    const directory = await temporaryDirectory();
+    const ready = join(directory, "parent-ready.txt");
+    const sentinel = join(directory, "abort-grandchild-survived.txt");
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      "const fs = require('node:fs')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      `fs.writeFileSync(${JSON.stringify(ready)}, 'ready')`,
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+    const controller = new AbortController();
+    const pending = runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      signal: controller.signal,
+    });
+    await expect.poll(async () => {
+      try { return await readFile(ready, "utf8"); } catch { return null; }
+    }, { timeout: 2_000 }).toBe("ready");
+
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ aborted: true });
+    await afterGrandchildFuse();
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  }, TREE_TERMINATION_TIMEOUT_MS);
+
+  test("confirms the complete process tree is gone before output-limit resolution", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "output-grandchild-survived.txt");
+    const grandchild = `process.on('SIGTERM', () => {}); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'survived'), ${GRANDCHILD_FUSE_MS})`;
+    const parent = [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+      "process.stdout.write('x'.repeat(4_096))",
+      "setInterval(() => {}, 1_000)",
+    ].join(";");
+
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", parent],
+      env: {},
+      maxOutputBytes: 64,
+    });
+
+    expect(result.outputLimitExceeded).toBe(true);
+    await afterGrandchildFuse();
+    await expect(readFile(sentinel, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  }, TREE_TERMINATION_TIMEOUT_MS);
+
+  // Production break caught: unbounded model output could exhaust server memory.
+  test("terminates and caps combined output", async () => {
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write('x'.repeat(4096)); setInterval(() => {}, 1_000)"],
+      env: {},
+      maxOutputBytes: 64,
+    });
+
+    expect(result.outputLimitExceeded).toBe(true);
+    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(64);
+  });
+
+  // Production break caught: a cancelled HTTP request could leave Hermes running in the background.
+  test("terminates a command when its abort signal fires", async () => {
+    const controller = new AbortController();
+    const pending = runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "setInterval(() => {}, 1_000)"],
+      env: {},
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 25);
+
+    await expect(pending).resolves.toMatchObject({ code: null, timedOut: false, aborted: true });
+  });
+
+  // Production break caught: a forbidden credential in the parent environment could leak into Hermes by inheritance.
+  test("does not inherit forbidden parent environment keys", async () => {
+    const original = process.env.CODEG_TOKEN;
+    process.env.CODEG_TOKEN = "must-not-reach-child";
+    try {
+      const result = await runCommand({
+        executable,
+        allowedExecutables,
+        args: ["-e", "process.stdout.write(String(process.env.CODEG_TOKEN))"],
+        env: {},
+      });
+      expect(result.stdout).toBe("undefined");
+    } finally {
+      if (original === undefined) delete process.env.CODEG_TOKEN;
+      else process.env.CODEG_TOKEN = original;
+    }
+  });
+
+  // Production break caught: Hermes could inherit the AgentDash workspace and discover project-local instructions or files.
+  test("runs in an explicit disposable working directory", async () => {
+    const directory = await temporaryDirectory();
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write(process.cwd())"],
+      env: {},
+      cwd: directory,
+    });
+
+    expect(result.stdout.toLowerCase()).toBe(directory.toLowerCase());
+  });
+
+  // Production break caught: case changes could bypass the forbidden child-environment policy.
+  test("rejects forbidden child environment keys case-insensitively", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: [],
+      env: { cOdEg_ToKeN: "must-not-reach-child" },
+    })).rejects.toSatisfy((error: unknown) => {
+      expect(error).toMatchObject({ code: "forbidden_environment" });
+      expect(String(error)).not.toContain("must-not-reach-child");
+      return true;
+    });
+  });
+
+  // Production break caught: model or process errors could echo credential-shaped values to an API consumer.
+  test("redacts credential-shaped command output", async () => {
+    const secret = "sk-test_abcdefghijklmnopqrstuvwxyz";
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `process.stderr.write(${JSON.stringify(secret)}); process.exit(1)`],
+      env: {},
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("[REDACTED]");
+    expect(result.stderr).not.toContain(secret);
+  });
+
+  // Production break caught: redactValues carries live capability tokens - controller-admin.ts
+  // and kanban-adapter.ts both pass real ones - and only the credential-SHAPE pass was tested.
+  // A capability token that looks like nothing in particular matches no shape, so deleting the
+  // caller-supplied redaction loop leaked it verbatim to an API consumer with every test green.
+  test("redacts caller-supplied secrets that match no credential shape", async () => {
+    const token = "plain-capability-value-shaped-like-nothing";
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `process.stdout.write(${JSON.stringify(token)}); process.stderr.write(${JSON.stringify(token)})`],
+      env: {},
+      redactValues: [token],
+    });
+
+    expect(result.stdout).toBe("[REDACTED]");
+    expect(result.stderr).toBe("[REDACTED]");
+  });
+
+  // Production break caught: only stderr redaction was asserted, so the stdout call could be
+  // dropped entirely and a secret would come back through the other stream untouched.
+  test("redacts credential shapes on stdout, not only stderr", async () => {
+    const secret = "sk-live_abcdefghijklmnopqrstuvwxyz";
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `process.stdout.write(${JSON.stringify(secret)})`],
+      env: {},
+    });
+
+    expect(result.stdout).toContain("[REDACTED]");
+    expect(result.stdout).not.toContain(secret);
+  });
+
+  // Production break caught: an unbounded argv is an unbounded command line. Nothing asserted
+  // the count, size, or NUL bounds, so all three could be deleted with the suite still green.
+  test("rejects an argument list past the validated count bound", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: Array.from({ length: 129 }, () => "-e"),
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  test("rejects an argument past the validated size bound", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "0", "x".repeat(64 * 1024 + 1)],
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  // A NUL truncates the argument at the OS boundary, so anything after it is invisible to the
+  // policy that just approved the whole string.
+  test("rejects an argument carrying a NUL byte", async () => {
+    await expect(runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write('ok')\0 trailing"],
+      env: {},
+    })).rejects.toMatchObject({ code: "invalid_arguments" });
+  });
+
+  // Production break caught: forbidden keys threw, but malformed ones were silently dropped by an
+  // untested check. Without it a key that is not an identifier reaches the child's environment.
+  test("drops child environment keys that are not plain identifiers", async () => {
+    const result = await runCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", "process.stdout.write(Object.keys(process.env).filter((key) => key.includes('AGENTDASH')).sort().join(','))"],
+      env: { AGENTDASH_KEPT: "1", "AGENTDASH-DROPPED": "1", "9AGENTDASH": "1" },
+    });
+
+    expect(result.stdout).toBe("AGENTDASH_KEPT");
+  });
+});
+
+describe("launchDetachedCommand", () => {
+  // Production break caught: detached dashboard launches could bypass the same shell and allowlist controls.
+  test("launches an allowlisted executable through the hardened detached path", async () => {
+    const directory = await temporaryDirectory();
+    const sentinel = join(directory, "detached.txt");
+
+    const result = launchDetachedCommand({
+      executable,
+      allowedExecutables,
+      args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'started')`],
+      env: {},
+    });
+
+    expect(result.pid).toBeTypeOf("number");
+    await expect.poll(async () => {
+      try { return await readFile(sentinel, "utf8"); } catch { return null; }
+    }, { timeout: 2_000 }).toBe("started");
+  });
+
+  // Production break caught: the detached launcher is a second door to the same OS process, used
+  // by cli.ts. Only its happy path was tested, so dropping its validate() call left the allowlist,
+  // the script-extension rule and the argument bounds unenforced on that path alone.
+  test("applies the same executable policy on the detached path", async () => {
+    const other = join(await temporaryDirectory(), "not-the-node-binary.exe");
+    let rejection: unknown;
+
+    try {
+      launchDetachedCommand({ executable, allowedExecutables: [other], args: [], env: {} });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toMatchObject({ code: "executable_not_allowed" });
+  });
+});

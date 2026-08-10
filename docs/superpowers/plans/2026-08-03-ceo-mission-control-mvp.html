@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CEO Mission Control MVP — Implementation Map</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09100f;
+      --panel: #111a18;
+      --panel-2: #17221f;
+      --line: #293a35;
+      --text: #f4f0e8;
+      --muted: #aab7b1;
+      --mint: #7ce3bb;
+      --mint-2: #b2f5d8;
+      --amber: #ffc66d;
+      --red: #ff8a86;
+      --blue: #88b8ff;
+      --violet: #c7a7ff;
+      --shadow: 0 18px 55px rgba(0, 0, 0, .32);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 80% 0%, rgba(124, 227, 187, .12), transparent 28rem),
+        radial-gradient(circle at 0% 42%, rgba(136, 184, 255, .08), transparent 26rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    a { color: var(--mint-2); }
+    button, input { font: inherit; }
+    .skip {
+      position: fixed; left: 12px; top: -50px; z-index: 100;
+      padding: 10px 14px; background: var(--text); color: var(--bg); border-radius: 8px;
+    }
+    .skip:focus { top: 12px; }
+    .shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 100vh; }
+    aside {
+      position: sticky; top: 0; height: 100vh; padding: 28px 22px;
+      border-right: 1px solid var(--line); background: rgba(9, 16, 15, .9); backdrop-filter: blur(18px);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 30px; }
+    .brand-mark {
+      width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px;
+      background: linear-gradient(145deg, var(--mint), #3b8e70); color: #06100c; font-weight: 900;
+      box-shadow: 0 8px 30px rgba(124, 227, 187, .22);
+    }
+    .brand strong { display: block; letter-spacing: -.02em; }
+    .brand small { display: block; color: var(--muted); }
+    nav { display: grid; gap: 7px; }
+    nav a {
+      color: var(--muted); text-decoration: none; padding: 9px 11px; border-radius: 9px;
+      border: 1px solid transparent;
+    }
+    nav a:hover, nav a:focus-visible { color: var(--text); background: var(--panel); border-color: var(--line); }
+    .aside-note { position: absolute; left: 22px; right: 22px; bottom: 24px; color: var(--muted); font-size: 12px; }
+    .aside-note a { display: inline-block; margin-top: 8px; }
+    main { width: min(1240px, 100%); padding: 48px clamp(24px, 5vw, 72px) 90px; }
+    section { scroll-margin-top: 26px; margin-top: 76px; }
+    .eyebrow { color: var(--mint); text-transform: uppercase; letter-spacing: .15em; font-size: 12px; font-weight: 800; }
+    h1 { font-size: clamp(42px, 7vw, 82px); line-height: .95; letter-spacing: -.055em; margin: 15px 0 24px; max-width: 930px; }
+    h2 { font-size: clamp(28px, 4vw, 44px); line-height: 1.05; letter-spacing: -.035em; margin: 0 0 16px; }
+    h3 { font-size: 18px; line-height: 1.25; margin: 0; }
+    p { margin: 0 0 14px; }
+    .lede { max-width: 850px; font-size: clamp(18px, 2vw, 24px); color: #d4ddd8; }
+    .chips { display: flex; flex-wrap: wrap; gap: 9px; margin: 28px 0 0; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line);
+      padding: 7px 10px; border-radius: 999px; color: var(--muted); background: rgba(17, 26, 24, .7); font-size: 13px;
+    }
+    .chip strong { color: var(--text); }
+    .chip.go { border-color: rgba(124, 227, 187, .38); color: var(--mint-2); }
+    .chip.stop { border-color: rgba(255, 138, 134, .42); color: var(--red); }
+    .callout {
+      margin-top: 30px; padding: 20px 22px; border: 1px solid rgba(255, 198, 109, .35);
+      border-left: 4px solid var(--amber); border-radius: 14px; background: rgba(255, 198, 109, .06);
+    }
+    .callout strong { color: var(--amber); }
+    .section-head { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin-bottom: 24px; }
+    .section-head p { color: var(--muted); max-width: 650px; }
+    .ownership { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: stretch; }
+    .owner {
+      position: relative; min-height: 210px; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius);
+      background: linear-gradient(155deg, rgba(23, 34, 31, .96), rgba(13, 21, 19, .96)); box-shadow: var(--shadow);
+    }
+    .owner:not(:last-child)::after {
+      content: "→"; position: absolute; right: -21px; top: 50%; transform: translateY(-50%); z-index: 2;
+      width: 28px; height: 28px; display: grid; place-items: center; color: var(--mint); border: 1px solid var(--line);
+      border-radius: 50%; background: var(--bg);
+    }
+    .owner .num { color: var(--mint); font: 800 12px/1 monospace; margin-bottom: 20px; }
+    .owner h3 { margin-bottom: 12px; }
+    .owner p { color: var(--muted); font-size: 14px; }
+    .owner .never { color: var(--red); font-size: 12px; margin-top: 18px; }
+    .mandate-flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 9px; margin-top: 20px; }
+    .flow-step { padding: 15px 13px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); min-height: 108px; }
+    .flow-step b { display: block; color: var(--mint-2); font-size: 12px; margin-bottom: 8px; }
+    .flow-step span { color: var(--muted); font-size: 12px; }
+    .gates { display: grid; gap: 10px; }
+    .gate {
+      display: grid; grid-template-columns: 46px minmax(160px, .75fr) 1.6fr 108px; gap: 14px; align-items: center;
+      padding: 14px 16px; border: 1px solid var(--line); background: var(--panel); border-radius: 12px;
+    }
+    .gate-num { color: var(--muted); font: 700 12px/1 monospace; }
+    .gate p { color: var(--muted); font-size: 13px; margin: 0; }
+    .status { justify-self: end; font: 800 11px/1 monospace; text-transform: uppercase; letter-spacing: .08em; }
+    .status.no-go { color: var(--red); }
+    .status.proof { color: var(--amber); }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin: 20px 0 24px; }
+    .controls button, .controls input {
+      border: 1px solid var(--line); color: var(--muted); background: var(--panel); border-radius: 10px; padding: 9px 12px;
+    }
+    .controls button { cursor: pointer; }
+    .controls button[aria-pressed="true"] { color: #07110d; background: var(--mint); border-color: var(--mint); font-weight: 800; }
+    .controls input { min-width: min(100%, 270px); color: var(--text); }
+    .phase { margin: 28px 0 42px; }
+    .phase-title { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .phase-title span { color: var(--muted); font-size: 13px; }
+    .task-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    details.task { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; overflow: hidden; }
+    details.task[open] { border-color: rgba(124, 227, 187, .42); background: var(--panel-2); }
+    details.task[hidden] { display: none; }
+    details.task summary { list-style: none; cursor: pointer; padding: 17px 18px; display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: start; }
+    details.task summary::-webkit-details-marker { display: none; }
+    .task-id { color: var(--mint); font: 800 12px/1.4 monospace; }
+    .task-title { font-weight: 750; line-height: 1.25; }
+    .task-tag { color: var(--muted); font: 700 10px/1 monospace; border: 1px solid var(--line); padding: 5px 7px; border-radius: 999px; text-transform: uppercase; }
+    .task-body { padding: 0 18px 18px 72px; color: var(--muted); }
+    .task-body strong { color: var(--text); }
+    .task-body ul { padding-left: 18px; margin: 10px 0 0; }
+    .task-body li + li { margin-top: 5px; }
+    .lanes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+    .lane { min-height: 185px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 16px; }
+    .lane h3 { font-size: 14px; margin-bottom: 12px; }
+    .lane p { color: var(--muted); font-size: 12px; }
+    .lane .rule { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--mint-2); font-size: 11px; }
+    .matrix { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 14px; background: var(--panel); }
+    .matrix th, .matrix td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .matrix th { color: var(--mint-2); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; background: var(--panel-2); }
+    .matrix td { color: var(--muted); font-size: 13px; }
+    .matrix td:first-child { color: var(--text); font-weight: 650; }
+    .handoff { display: grid; grid-template-columns: 1.25fr .75fr; gap: 16px; }
+    .handoff-card { padding: 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+    .handoff-card h3 { margin-bottom: 12px; }
+    .handoff-card p, .handoff-card li { color: var(--muted); }
+    .handoff-card ul { padding-left: 18px; }
+    .source-link { display: inline-flex; margin-top: 14px; padding: 10px 14px; border-radius: 10px; background: var(--mint); color: #07110d; text-decoration: none; font-weight: 800; }
+    footer { color: var(--muted); border-top: 1px solid var(--line); margin-top: 76px; padding-top: 20px; font-size: 12px; }
+    @media (max-width: 1050px) {
+      .ownership { grid-template-columns: repeat(2, 1fr); }
+      .owner::after { display: none !important; }
+      .mandate-flow { grid-template-columns: repeat(3, 1fr); }
+      .lanes { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 760px) {
+      .shell { display: block; }
+      aside { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav { grid-template-columns: repeat(3, 1fr); }
+      .aside-note { position: static; margin-top: 18px; }
+      main { padding-top: 34px; }
+      .ownership, .task-grid, .handoff { grid-template-columns: 1fr; }
+      .mandate-flow { grid-template-columns: repeat(2, 1fr); }
+      .gate { grid-template-columns: 34px 1fr auto; }
+      .gate p { grid-column: 2 / -1; }
+      .lanes { grid-template-columns: 1fr; }
+      .matrix { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to implementation map</a>
+  <div class="shell">
+    <aside aria-label="Plan navigation">
+      <div class="brand"><div class="brand-mark">MC</div><div><strong>Mission Control</strong><small>Implementation map</small></div></div>
+      <nav>
+        <a href="#overview">Overview</a>
+        <a href="#architecture">Ownership</a>
+        <a href="#gates">Hard gates</a>
+        <a href="#roadmap">18 tasks</a>
+        <a href="#states">Board states</a>
+        <a href="#traceability">Traceability</a>
+        <a href="#handoff">Handoff</a>
+      </nav>
+      <div class="aside-note">Canonical source<br><a href="2026-08-03-ceo-mission-control-mvp.md">Open the executable Markdown plan →</a></div>
+    </aside>
+
+    <main id="content">
+      <section id="overview" style="margin-top:0">
+        <div class="eyebrow">Approved design · execution plan</div>
+        <h1>One CEO. One PM. The right worker for every action.</h1>
+        <p class="lede">AgentDash becomes the control plane above Hermes and CodeG: you speak normally to a project manager, every executable request becomes a visible card, and the controller keeps the work moving until it is truly complete or needs a real business decision.</p>
+        <div class="chips">
+          <span class="chip go"><strong>18</strong> ordered tasks</span>
+          <span class="chip"><strong>15</strong> specified route candidates</span>
+          <span class="chip"><strong>5</strong> unresolved templates</span>
+          <span class="chip"><strong>1</strong> disabled item</span>
+          <span class="chip stop"><strong>Dispatch</strong> NO-GO until proof</span>
+        </div>
+        <div class="callout"><strong>The governing rule:</strong> one CEO approval activates one complete, finite mandate. Retries, scoped remediation, independent verification, and exact finalization continue inside that mandate without repeatedly interrupting you.</div>
+      </section>
+
+      <section id="architecture">
+        <div class="section-head"><div><div class="eyebrow">System ownership</div><h2>Management is separated from authority and work.</h2></div><p>The PM can explain and propose. Only the deterministic controller can authorize. Every model-backed action lives in CodeG and stays inspectable.</p></div>
+        <div class="ownership">
+          <article class="owner"><div class="num">01</div><h3>CEO</h3><p>States goals in ordinary language, approves a complete high-stakes mandate, and answers typed business decisions.</p><div class="never">Never asked to diagnose transport or retry mechanics.</div></article>
+          <article class="owner"><div class="num">02</div><h3>Hermes PM</h3><p>Clarifies, recalls reviewed context, drafts TaskSpec and route proposals, and summarizes original receipts.</p><div class="never">No shell, files, browser, research, worker delegation, or lifecycle authority.</div></article>
+          <article class="owner"><div class="num">03</div><h3>AgentDash controller</h3><p>Validates finite paths, budgets, evidence, CEO provenance, one-time authority, outcomes, reconciliation, and finalization.</p><div class="never">No model discretion inside lifecycle transitions.</div></article>
+          <article class="owner"><div class="num">04</div><h3>CodeG workers</h3><p>Run the exact harness/model route, expose original activity, and bind every action to its exact session and artifacts.</p><div class="never">Never self-approve or finalize outside the command.</div></article>
+        </div>
+        <div class="mandate-flow" aria-label="Complete mandate lifecycle">
+          <div class="flow-step"><b>1 · INTAKE</b><span>Stable request → validated proposal → lifetime card + immutable specs</span></div>
+          <div class="flow-step"><b>2 · PROVE</b><span>Closed graph, limits, reserves, routes, verifier, finalizer</span></div>
+          <div class="flow-step"><b>3 · ACTIVATE</b><span>CEO command or equivalent auto receipt binds one revision</span></div>
+          <div class="flow-step"><b>4 · EXECUTE</b><span>One authority → one replay-safe command → one session</span></div>
+          <div class="flow-step"><b>5 · VERIFY</b><span>Independent from every realized mutating route</span></div>
+          <div class="flow-step"><b>6 · FINALIZE</b><span>Exact mutation, CAS, expected post-state, immutable receipt</span></div>
+        </div>
+      </section>
+
+      <section id="gates">
+        <div class="section-head"><div><div class="eyebrow">Proof-first release</div><h2>Ten gates prevent optimistic dispatch.</h2></div><p>Installed Hermes and CodeG do not currently satisfy the approved guarantees. Read-only planning and UI work can proceed; real worker launch cannot.</p></div>
+        <div class="gates">
+          <div class="gate"><div class="gate-num">G01</div><strong>Local authority</strong><p>Loopback bind, Host/Origin/CSRF, single-use CEO nonce, one controller owner</p><span class="status proof">prove</span></div>
+          <div class="gate"><div class="gate-num">G02</div><strong>Hermes atomicity</strong><p>Lifetime task identity, digest artifacts, command/run CAS, terminal intent</p><span class="status no-go">no-go</span></div>
+          <div class="gate"><div class="gate-num">G03</div><strong>CodeG replay safety</strong><p>Unique command key, definitive lookup, exact cancel, no duplicate work</p><span class="status no-go">no-go</span></div>
+          <div class="gate"><div class="gate-num">G04</div><strong>Identity + workspace</strong><p>Real-path folder equality and separate task, conversation, connection, session ids</p><span class="status proof">prove</span></div>
+          <div class="gate"><div class="gate-num">G05</div><strong>Original activity</strong><p>ACP/model/tool/file/check transcript with a monotonic resumable cursor</p><span class="status no-go">no-go</span></div>
+          <div class="gate"><div class="gate-num">G06</div><strong>Ceilings + cancel</strong><p>Runtime/cost facts, exact generation stop, bounded confirmation</p><span class="status no-go">no-go</span></div>
+          <div class="gate"><div class="gate-num">G07</div><strong>Exact finalization</strong><p>Artifact, patch, base/target, CAS, expected post-state, lookup after ambiguity</p><span class="status no-go">no-go</span></div>
+          <div class="gate"><div class="gate-num">G08</div><strong>PM containment</strong><p>Live inventory and side-effect tests prove zero worker capability</p><span class="status proof">prove</span></div>
+          <div class="gate"><div class="gate-num">G09</div><strong>Recovery</strong><p>Single controller, durable outbox, bounded reconciliation, restart reattachment</p><span class="status proof">prove</span></div>
+          <div class="gate"><div class="gate-num">G10</div><strong>Route quality</strong><p>Current level-5 route/task-class evidence and path-specific verifier independence</p><span class="status proof">prove</span></div>
+        </div>
+      </section>
+
+      <section id="roadmap">
+        <div class="section-head"><div><div class="eyebrow">Ordered roadmap</div><h2>Thin slices, dormant until proven.</h2></div><p>Filter the map by implementation phase. Open a task for its deliverable, boundary, and decisive test.</p></div>
+        <div class="controls" aria-label="Roadmap filters">
+          <button type="button" data-filter="all" aria-pressed="true">All</button>
+          <button type="button" data-filter="foundation" aria-pressed="false">Foundation</button>
+          <button type="button" data-filter="bridges" aria-pressed="false">Harness bridges</button>
+          <button type="button" data-filter="controller" aria-pressed="false">Controller</button>
+          <button type="button" data-filter="experience" aria-pressed="false">Experience</button>
+          <button type="button" data-filter="release" aria-pressed="false">Release</button>
+          <input id="task-search" type="search" placeholder="Search tasks" aria-label="Search implementation tasks">
+        </div>
+
+        <div class="phase" data-phase-group="foundation"><div class="phase-title"><h3>Phase I · Foundation</h3><span>Tasks 1–6 · safe UI, contracts, PM, and complete authority model</span></div><div class="task-grid">
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T01</span><span class="task-title">Capability baseline + permanent NO-GO gate</span><span class="task-tag">proof</span></summary><div class="task-body"><strong>Outcome:</strong> redacted, digest-addressed evidence names every missing guarantee.<ul><li>Read-only probes only</li><li>Real environment must initially fail closed</li></ul></div></details>
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T02</span><span class="task-title">Test stack + local command boundary</span><span class="task-tag">security</span></summary><div class="task-body"><strong>Outcome:</strong> loopback-only app, same-origin session, CSRF binding, and one-time nonces.<ul><li>Zod, Vitest, Testing Library, Playwright</li><li>Secrets remain server-side and redacted</li></ul></div></details>
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T03</span><span class="task-title">Strict contracts, digests, and ports</span><span class="task-tag">contract</span></summary><div class="task-body"><strong>Outcome:</strong> TaskSpec, finite mandate, authority, command, outcomes, and receipts have strict canonical schemas.<ul><li>Unknown fields fail</li><li>PM proposals contain no authority fields</li></ul></div></details>
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T04</span><span class="task-title">Read-only Direction A workspace</span><span class="task-tag">ui</span></summary><div class="task-body"><strong>Outcome:</strong> PM left, board center, selected attempt right; existing overview moves to <code>/overview</code>.<ul><li>Five truthful lanes</li><li>No active-looking controls yet</li></ul></div></details>
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T05</span><span class="task-title">Capability-isolated Hermes PM</span><span class="task-tag">pm</span></summary><div class="task-body"><strong>Outcome:</strong> Terra-preferred, Sonnet-fallback PM returns conversation plus untrusted structured proposals.<ul><li>Shell-free runner and allowlisted environment</li><li>Live zero-side-effect containment proof</li></ul></div></details>
+          <details class="task" data-phase="foundation"><summary><span class="task-id">T06</span><span class="task-title">Intake transaction + finite mandate activation</span><span class="task-tag">authority</span></summary><div class="task-body"><strong>Outcome:</strong> one stable request id produces one lifetime card with TaskSpec, mandate, route snapshot, and auto receipt or typed approval request before any worker call.<ul><li>Every outcome has one edge and every path is budgeted</li><li>No CodeG work on stale, replayed, or partially persisted intake</li></ul></div></details>
+        </div></div>
+
+        <div class="phase" data-phase-group="bridges"><div class="phase-title"><h3>Phase II · Harness bridges</h3><span>Tasks 7–10 · clean upstream extensions, adapters, and route evidence</span></div><div class="task-grid">
+          <details class="task" data-phase="bridges"><summary><span class="task-id">T07</span><span class="task-title">Atomic external-controller bridge for Hermes</span><span class="task-tag">hermes</span></summary><div class="task-body"><strong>Outcome:</strong> lifetime task ensure, digest artifacts, action preparation, run binding/events, CEO input, and terminal CAS are transactional.<ul><li>Clean isolated worktree</li><li>Fixed restricted service identity and handle-pinned protected root</li><li>Never invokes Hermes worker dispatch</li></ul></div></details>
+          <details class="task" data-phase="bridges"><summary><span class="task-id">T08</span><span class="task-title">Replay-safe Work Task bridge for CodeG</span><span class="task-tag">codeg</span></summary><div class="task-body"><strong>Outcome:</strong> unique command-key ensure, definitive lookup, original cursor activity, exact cancel, and identities.<ul><li>Loopback + bearer + Origin</li><li>Worker output remains reviewable, never auto-merged</li></ul></div></details>
+          <details class="task" data-phase="bridges"><summary><span class="task-id">T09</span><span class="task-title">Hardened adapters + workspace containment</span><span class="task-tag">adapter</span></summary><div class="task-body"><strong>Outcome:</strong> strict loopback clients, real-path equality, opaque identities, and reviewed AgentBrain recall.<ul><li>Timeout becomes unknown</li><li>No direct database access</li></ul></div></details>
+          <details class="task" data-phase="bridges"><summary><span class="task-id">T10</span><span class="task-title">Route inventory + level-5 evaluator</span><span class="task-tag">routing</span></summary><div class="task-body"><strong>Outcome:</strong> 15 specified candidates and five incomplete templates remain hypotheses; the twenty-first item is explicitly disabled. Only current exact route/task-class proofs become eligible.<ul><li>Operator-gated qualification mode on disposable resources</li><li>Wilson thresholds and path-specific verifier query</li></ul></div></details>
+        </div></div>
+
+        <div class="phase" data-phase-group="controller"><div class="phase-title"><h3>Phase III · Deterministic controller</h3><span>Tasks 11–14 · outcomes, replay, continuation, verification, finalization</span></div><div class="task-grid">
+          <details class="task" data-phase="controller"><summary><span class="task-id">T11</span><span class="task-title">State machine + aggregate budget ledger</span><span class="task-tag">logic</span></summary><div class="task-body"><strong>Outcome:</strong> deterministic outcome precedence, graph visits, monotonic spend, and one-time task reserves.<ul><li>Every nonterminal state has one next mechanism</li><li>Remediation invalidates prior verification</li></ul></div></details>
+          <details class="task" data-phase="controller"><summary><span class="task-id">T12</span><span class="task-title">Dormant command journal + recovery outbox</span><span class="task-tag">runtime</span></summary><div class="task-body"><strong>Outcome:</strong> one controller owner and one logical command survive every crash boundary across disabled, qualification, candidate, and enabled modes.<ul><li>Qualification is CLI-only and disposable; normal model dispatch still rejects</li><li>Lookup before replay; results journal before Hermes delivery</li></ul></div></details>
+          <details class="task" data-phase="controller"><summary><span class="task-id">T13</span><span class="task-title">Bounded retry + scoped remediation</span><span class="task-tag">continuity</span></summary><div class="task-body"><strong>Outcome:</strong> technical recovery keeps moving within the activated graph and aggregate limits.<ul><li>No repeated CEO interruption</li><li>Scope expansion creates typed CEO input and stops</li></ul></div></details>
+          <details class="task" data-phase="controller"><summary><span class="task-id">T14</span><span class="task-title">Independent verification + exact finalization</span><span class="task-tag">integrity</span></summary><div class="task-body"><strong>Outcome:</strong> realized-route independence and artifact/post-state-bound no-change or local Git fast-forward.<ul><li>Tier 2 differs by provider and outer harness</li><li>Ambiguous mutation is looked up, never blindly repeated</li></ul></div></details>
+        </div></div>
+
+        <div class="phase" data-phase-group="experience"><div class="phase-title"><h3>Phase IV · Visibility and reliability</h3><span>Tasks 15–16 · exact work inspection and bounded uncertainty</span></div><div class="task-grid">
+          <details class="task" data-phase="experience"><summary><span class="task-id">T15</span><span class="task-title">Original activity + exact session navigation</span><span class="task-tag">visibility</span></summary><div class="task-body"><strong>Outcome:</strong> Live, Files, Checks, Receipt, every attempt, exact phase, and CodeG deep link.<ul><li>No synthesized worker transcript</li><li>Deterministic actions say no worker session</li></ul></div></details>
+          <details class="task" data-phase="experience"><summary><span class="task-id">T16</span><span class="task-title">Cancellation + bounded reconciliation</span><span class="task-tag">recovery</span></summary><div class="task-body"><strong>Outcome:</strong> five numeric deadlines, startup reattachment, truthful inconsistency, and reconciliation-pending overlay.<ul><li>Unconfirmed cancel never becomes cancelled</li><li>Read-only safety monitor cannot rewrite terminal outcome</li></ul></div></details>
+        </div></div>
+
+        <div class="phase" data-phase-group="release"><div class="phase-title"><h3>Phase V · Promotion and acceptance</h3><span>Tasks 17–18 · explicit gate promotion and complete CEO proof</span></div><div class="task-grid">
+          <details class="task" data-phase="release"><summary><span class="task-id">T17</span><span class="task-title">Refresh proofs + deliberately enable dispatch</span><span class="task-tag">promotion</span></summary><div class="task-body"><strong>Outcome:</strong> exact commits, evidence digests, expiries, and ≤$1/≤30-minute auto facts control enablement.<ul><li>Candidate fixtures, then a complete harmless qualification path</li><li>Only its validated receipt can promote normal CEO dispatch</li></ul></div></details>
+          <details class="task" data-phase="release"><summary><span class="task-id">T18</span><span class="task-title">15 end-to-end flows + operating runbook</span><span class="task-tag">acceptance</span></summary><div class="task-body"><strong>Outcome:</strong> mock/live Playwright, fault injection at every command boundary, and safe operator recovery.<ul><li>Exact session from every model action card</li><li>Rollback is dispatch-disabled, never database editing</li></ul></div></details>
+        </div></div>
+      </section>
+
+      <section id="states">
+        <div class="section-head"><div><div class="eyebrow">Board truth</div><h2>Progress is a phase, not a blanket tag.</h2></div><p>The canonical Hermes state stays visible as a chip; the CEO lane is a simple projection with strict membership rules.</p></div>
+        <div class="lanes">
+          <article class="lane"><h3>Ready</h3><p>Proposed, scheduled, or ready cards. Approval-required work has no worker session before activation.</p><div class="rule">Exact source state remains visible.</div></article>
+          <article class="lane"><h3>Working</h3><p>Execute, retry, remediate, verify, finalize, cancel, or reconcile—with attempt, cost, elapsed time, and next scheduled action.</p><div class="rule">Only while a bounded next mechanism exists.</div></article>
+          <article class="lane"><h3>Needs you</h3><p>Only a typed business/authority decision with the proposed TaskSpec revision and consequences.</p><div class="rule">Never technical ambiguity.</div></article>
+          <article class="lane"><h3>Stopped</h3><p>Failed, timed out, budget exhausted, cancelled, route unavailable, or inconsistent. Receipts and unresolved identities remain visible.</p><div class="rule">Reconciliation pending stays here.</div></article>
+          <article class="lane"><h3>Completed</h3><p>Successful action, verification, exact finalization, and aggregate receipts are all durable.</p><div class="rule">Success only.</div></article>
+        </div>
+      </section>
+
+      <section id="traceability">
+        <div class="section-head"><div><div class="eyebrow">Traceability</div><h2>Every promise lands in code and a proof.</h2></div><p>The Markdown plan contains the complete file-by-file TDD steps and commit commands.</p></div>
+        <table class="matrix">
+          <thead><tr><th>Promise</th><th>Tasks</th><th>Decisive evidence</th></tr></thead>
+          <tbody>
+            <tr><td>PM never performs work</td><td>3, 5, 9</td><td>Strict proposal schema, zero-tool inventory, live side-effect probes</td></tr>
+            <tr><td>One approval covers the complete path</td><td>6, 11, 13, 17</td><td>Closed graph, one activation, automatic authorized continuation</td></tr>
+            <tr><td>One model action → one exact session</td><td>7, 8, 12, 15</td><td>Atomic command key, separate identities, cursor replay, native URI</td></tr>
+            <tr><td>High-stakes work is independently judged</td><td>6, 10, 14</td><td>Success-path proof and realized-route Tier 2 independence</td></tr>
+            <tr><td>Finalization cannot drift</td><td>14, 16</td><td>Exact mutation, CAS, expected post-state, restart lookup</td></tr>
+            <tr><td>Uncertainty cannot remain “in progress”</td><td>12, 16, 18</td><td>Durable outbox, five deadlines, terminal inconsistent overlay</td></tr>
+            <tr><td>Auto is cheap and low-risk only</td><td>6, 10, 17</td><td>Complete-path proof and one-field-negative ≤$1/≤30m policy matrix</td></tr>
+            <tr><td>All CEO acceptance flows work</td><td>18</td><td>15 named mock/live scenarios plus crash-boundary fault harness</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="handoff">
+        <div class="section-head"><div><div class="eyebrow">Execution handoff</div><h2>The first implementation move is proof, not launch.</h2></div></div>
+        <div class="handoff">
+          <article class="handoff-card"><h3>Recommended execution style</h3><p>Run the 18 tasks sequentially with a fresh bounded worker per task and a review checkpoint after each commit. External Hermes and CodeG changes live in their own clean worktrees; AgentDash remains the integration authority.</p><a class="source-link" href="2026-08-03-ceo-mission-control-mvp.md">Read the canonical plan →</a></article>
+          <article class="handoff-card"><h3>Stop immediately when</h3><ul><li>A proof is missing or stale</li><li>An exact path or interface differs</li><li>A command could duplicate work</li><li>A route is merely listed, not qualified</li><li>A finalizer cannot prove post-state</li></ul></article>
+        </div>
+      </section>
+
+      <footer>CEO Mission Control MVP · Approved design commit 42ba01b · Visual companion to the canonical Markdown implementation plan.</footer>
+    </main>
+  </div>
+
+  <script>
+    const buttons = [...document.querySelectorAll('[data-filter]')];
+    const tasks = [...document.querySelectorAll('details.task')];
+    const groups = [...document.querySelectorAll('[data-phase-group]')];
+    const search = document.querySelector('#task-search');
+    let filter = 'all';
+
+    function applyFilters() {
+      const query = search.value.trim().toLowerCase();
+      tasks.forEach(task => {
+        const phaseMatch = filter === 'all' || task.dataset.phase === filter;
+        const textMatch = !query || task.textContent.toLowerCase().includes(query);
+        task.hidden = !(phaseMatch && textMatch);
+      });
+      groups.forEach(group => {
+        group.hidden = ![...group.querySelectorAll('details.task')].some(task => !task.hidden);
+      });
+    }
+
+    buttons.forEach(button => button.addEventListener('click', () => {
+      filter = button.dataset.filter;
+      buttons.forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+      applyFilters();
+    }));
+    search.addEventListener('input', applyFilters);
+  </script>
+</body>
+</html>

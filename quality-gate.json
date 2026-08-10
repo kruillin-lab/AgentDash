@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "project": "agentdash",
+  "profile": "node-nextjs",
+  "paths": {
+    "report_dir": ".quality-gate/reports",
+    "run_dir": ".quality-gate/runs",
+    "log_dir": ".quality-gate/logs"
+  },
+  "levels": {
+    "smoke": {
+      "required": ["changed-files"]
+    },
+    "normal": {
+      "required": ["changed-files", "test-unit", "build", "lint", "typecheck"],
+      "conditional": ["markdown-audit-if-docs-changed"]
+    },
+    "release": {
+      "required": ["changed-files", "test-unit", "build", "lint", "typecheck"]
+    }
+  },
+  "commands": {
+    "test-unit": {
+      "shell": "powershell",
+      "command": "npm run test:unit",
+      "timeout_seconds": 180
+    },
+    "build": {
+      "shell": "powershell",
+      "command": "npm run build",
+      "timeout_seconds": 600
+    },
+    "lint": {
+      "shell": "powershell",
+      "command": "npm run lint",
+      "timeout_seconds": 180
+    },
+    "typecheck": {
+      "shell": "powershell",
+      "command": "npm run typecheck",
+      "timeout_seconds": 180
+    },
+    "markdown-audit": {
+      "shell": "powershell",
+      "command": "python C:\\Users\\kruil\\.codex\\skills\\obsidian-markdown-auditor\\scripts\\obsidian_markdown_audit.py validate --root C:\\Users\\kruil\\Documents\\Projects --stage stage2",
+      "timeout_seconds": 240
+    }
+  },
+  "changed_file_rules": {
+    "docs": {
+      "patterns": ["**/*.md"],
+      "checks": ["markdown-audit-if-docs-changed"]
+    },
+    "app": {
+      "patterns": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.css",
+        "next.config.mjs",
+        "tsconfig.json",
+        "tailwind.config.cjs",
+        "postcss.config.cjs"
+      ],
+      "risk": "app-critical"
+    },
+    "gate": {
+      "patterns": [
+        "quality-gate.json",
+        "package.json",
+        "package-lock.json",
+        ".eslintrc.json",
+        ".gitignore"
+      ],
+      "risk": "gate-critical"
+    },
+    "legacy": {
+      "patterns": ["legacy/**"],
+      "risk": "normal"
+    }
+  },
+  "exceptions": {
+    "allow_with_expiry": true,
+    "max_days": 14
+  }
+}

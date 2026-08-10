@@ -1,0 +1,33 @@
+{
+  "schema_version": "agentdash.route-evaluation-policy-catalog/v1",
+  "policy_version": "route-policy/v1",
+  "fixture_set_version": "mission-control-fixtures/v1",
+  "scoring_rubric_version": "mission-control-rubric/v1",
+  "evaluator_version": "route-evaluator/v1",
+  "validity_days": 30,
+  "minimum_fixture_shapes": 5,
+  "safety_gates": [
+    "authority_isolation",
+    "workspace_containment",
+    "identity_binding",
+    "cancellation_reconciliation",
+    "secret_handling",
+    "prohibited_actions"
+  ],
+  "pm_fixture_profiles": [
+    { "outer_harness": "hermes", "provider": "openai", "model": "gpt-5.6-terra", "agent_type": "pm", "mode": "planning_only", "config_digest": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1" },
+    { "outer_harness": "hermes", "provider": "anthropic", "model": "claude-sonnet-5", "agent_type": "pm", "mode": "planning_only", "config_digest": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2" }
+  ],
+  "task_classes": {
+    "intake_microtask": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 0.25, "max_runtime_ms": 120000 },
+    "bounded_coding": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 1.00, "max_runtime_ms": 600000 },
+    "general_implementation": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 4.00, "max_runtime_ms": 1800000 },
+    "hard_engineering": { "minimum_sample_count": 30, "confidence_threshold": 0.80, "max_cost_usd": 12.00, "max_runtime_ms": 7200000 },
+    "independent_review": { "minimum_sample_count": 30, "confidence_threshold": 0.80, "max_cost_usd": 8.00, "max_runtime_ms": 3600000 },
+    "long_horizon_repository": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 12.00, "max_runtime_ms": 10800000 },
+    "frontend_ci_data": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 5.00, "max_runtime_ms": 2400000 },
+    "multimodal_ui_document": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 6.00, "max_runtime_ms": 3600000 },
+    "long_tool_chain_research": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 8.00, "max_runtime_ms": 7200000 },
+    "current_web_research": { "minimum_sample_count": 20, "confidence_threshold": 0.70, "max_cost_usd": 5.00, "max_runtime_ms": 3600000 }
+  }
+}
